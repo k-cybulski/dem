@@ -1,4 +1,5 @@
 import numpy as np
+from matplotlib import pyplot as plt
 
 from hdm.core import taylor_mat
 
@@ -92,6 +93,8 @@ def plot_taylor_approx_for_sin_cos():
 def plot_taylor_inv_for_sin():
     """
     Sanity check to see if the inverse taylor_mat method works for computing derivatives.
+
+    This little experiment also shows the magnitude of error in computing derivatives.
     """
     t_start = 0
     t_end = 20
@@ -100,22 +103,25 @@ def plot_taylor_inv_for_sin():
     ts = np.arange(start=t_start, stop=t_end, step=dt)
     xs = np.sin(ts)
 
-    p = 20
+    ps_to_test = [2, 4, 8, 16, 32, 40]
+    for p in ps_to_test:
 
-    n0 = 100
+        n0 = 100
 
-    nstart = int(n0 - np.ceil(p / 2))
-    xs_to_inv = xs[nstart:nstart + p + 1].reshape((-1, 1))
-    x_gen_appr = np.linalg.inv(taylor_mat(p, dt)) @ xs_to_inv
+        nstart = int(n0 - np.ceil(p / 2))
+        xs_to_inv = xs[nstart:nstart + p + 1].reshape((-1, 1))
+        x_gen_appr = np.linalg.inv(taylor_mat(p, dt)) @ xs_to_inv
 
-    t0 = ts[n0]
-    x_gen_target = sin_gen(p + 1, t0)
+        t0 = ts[n0]
+        x_gen_target = sin_gen(p + 1, t0)
 
-    # Where do the derivatives differ?
-    plt.plot(np.abs(x_gen_appr - x_gen_target))
+        # Where do the derivatives differ?
+        plt.plot(np.abs(x_gen_appr - x_gen_target), label=f'p = {p}')
+
     plt.semilogy()
     plt.suptitle("Log absolute difference between true derivative and estimate")
     plt.xlabel("Which derivative")
+    plt.legend()
     plt.show()
 
 
