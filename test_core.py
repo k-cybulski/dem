@@ -85,8 +85,41 @@ def plot_taylor_approx_for_sin_cos():
         plt.plot(ts_for_appr, x1_appr, color='green')
         plt.plot(ts_for_appr, x2_appr, color='blue')
 
+    plt.suptitle("Approximate and actual function values")
     plt.show()
 
 
+def plot_taylor_inv_for_sin():
+    """
+    Sanity check to see if the inverse taylor_mat method works for computing derivatives.
+    """
+    t_start = 0
+    t_end = 20
+    t_span = (t_start, t_end)
+    dt = 0.1
+    ts = np.arange(start=t_start, stop=t_end, step=dt)
+    xs = np.sin(ts)
+
+    p = 20
+
+    n0 = 100
+
+    nstart = int(n0 - np.ceil(p / 2))
+    xs_to_inv = xs[nstart:nstart + p + 1].reshape((-1, 1))
+    x_gen_appr = np.linalg.inv(taylor_mat(p, dt)) @ xs_to_inv
+
+    t0 = ts[n0]
+    x_gen_target = sin_gen(p + 1, t0)
+
+    # Where do the derivatives differ?
+    plt.plot(np.abs(x_gen_appr - x_gen_target))
+    plt.semilogy()
+    plt.suptitle("Log absolute difference between true derivative and estimate")
+    plt.xlabel("Which derivative")
+    plt.show()
+
+
+
 if __name__ == '__main__':
-    plot_taylor_approx_for_sin()
+    plot_taylor_approx_for_sin_cos()
+    plot_taylor_inv_for_sin()

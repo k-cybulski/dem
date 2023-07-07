@@ -64,18 +64,3 @@ t_step = 30
 #     return xs
 
 # xs = evolve_system(x_0, A)
-
-def sin_gen(n, t):
-    matr = np.zeros((1, n))
-    for i in range(n):
-        i_mod = np.mod(i, 4)
-        match i_mod:
-            case 0:
-                matr[0, i] = np.sin(t)
-            case 1:
-                matr[0, i] = np.cos(t)
-            case 2:
-                matr[0, i] = -np.sin(t)
-            case 3:
-                matr[0, i] = -np.cos(t)
-    return matr
