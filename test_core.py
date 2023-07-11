@@ -184,7 +184,7 @@ def test_noise_gp_gen():
     plt.suptitle("Plot of (hopefully) non-autocorrelated noise")
     plt.show()
     autocorrelation_plot(sample)
-    plt.suptitle("Autocorrelation of (hopefully) non-autocorrelated noise")
+    plt.suptitle("Autocovariance of (hopefully) non-autocorrelated noise")
     plt.show()
 
     print("For non-autocorrelated noise...")
@@ -198,7 +198,7 @@ def test_noise_gp_gen():
     plt.suptitle("Plot of autocorrelated noise")
     plt.show()
     autocorrelation_plot(sample)
-    plt.suptitle("Autocorrelation of autocorrelated noise")
+    plt.suptitle("Autocovariance of autocorrelated noise")
     plt.show()
 
     print("For autocorrelated noise...")
@@ -228,6 +228,13 @@ def test_noise_gp_gen():
     cov_target = noise_cov_gen_theoretical(k, sig)
     plt.imshow(np.abs(cov_est - cov_target), norm='log')
     plt.suptitle("Estimation error for generalized noise covariance")
+    plt.colorbar()
+    plt.show()
+
+
+    cov_target = noise_cov_gen_theoretical(k, sig)
+    plt.imshow(np.abs(cov_est - cov_target) / np.max(np.abs(np.array([cov_est, cov_target])), axis=0))
+    plt.suptitle("Relative estimation error for generalized noise covariance")
     plt.colorbar()
     plt.show()
 
