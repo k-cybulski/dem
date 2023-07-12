@@ -31,11 +31,13 @@ def gaussian_conv_kern(kern_size, dt, sig):
     ys = ys / np.sum(ys)
     return ys
 
-def generate_noise_conv(n, dt, var, sig, kern_size, rng=None):
+def generate_noise_conv(n, dt, var, sig, kern_size=None, rng=None):
     if rng is None:
         rng = np.random.default_rng()
     elif not isinstance(rng, np.random.Generator):
         rng = np.random.default_rng(rng)
+    if kern_size is None:
+        kern_size = int(150 / dt) # rule of thumb for relatively good approximation
     kern = gaussian_conv_kern(kern_size, dt, sig)
     white_size = n + kern_size - 1
     white = np.random.normal(np.zeros(white_size), 1)
