@@ -3,11 +3,10 @@ from matplotlib import pyplot as plt
 from pandas.plotting import autocorrelation_plot
 from scipy.stats import multivariate_normal
 import sympy as sym
-
 from stochastic.processes.noise import ColoredNoise
 
 from hdm.core import taylor_mat
-from hdm.noise import noise_cov_gen, generate_noise_gp
+from hdm.noise import noise_cov_gen, generate_noise_gp, generate_noise_conv
 
 
 # Sanity check: Can we convert from generalized coordinates to normal coordinates?
@@ -166,7 +165,6 @@ def noise_cov_gen_theoretical(n, sig):
     return matr
 
 
-
 def test_noise_gp_gen():
     # Test if the noise sampled from a Gaussian Process has the properties we assume
     n = 1000
@@ -184,7 +182,7 @@ def test_noise_gp_gen():
     plt.suptitle("Plot of (hopefully) non-autocorrelated noise")
     plt.show()
     autocorrelation_plot(sample)
-    plt.suptitle("Autocovariance of (hopefully) non-autocorrelated noise")
+    plt.suptitle("Autocorrelation of (hopefully) non-autocorrelated noise")
     plt.show()
 
     print("For non-autocorrelated noise...")
@@ -198,7 +196,7 @@ def test_noise_gp_gen():
     plt.suptitle("Plot of autocorrelated noise")
     plt.show()
     autocorrelation_plot(sample)
-    plt.suptitle("Autocovariance of autocorrelated noise")
+    plt.suptitle("Autocorrelation of autocorrelated noise")
     plt.show()
 
     print("For autocorrelated noise...")
@@ -239,7 +237,116 @@ def test_noise_gp_gen():
     plt.show()
 
 
+def test_noise_stochastic_gen():
+    n = 1000
+    dt = 0.1
+    random_state = 5
+    rng = np.random.default_rng(random_state)
+    xs = (np.arange(n) * dt).reshape((-1, 1))
+    n_samples = 5000
+
+    # Let's do red noise
+    generator = ColoredNoise(beta=1, t=n * dt, rng=rng)
+    samples = np.vstack([generator.sample(n)[:-1] for _ in range(n_samples)]).T
+
+    ## Taylor inversion
+    k = 9
+    mat = taylor_mat(k - 1, dt)
+    gen_samples = []
+    for i in range(0, samples.shape[0] - k):
+        gen_sample = np.linalg.inv(mat) @ samples[i:(i + k), :]
+        gen_samples.append(gen_sample)
+    gen_samples = np.hstack(gen_samples)
+
+    cov_est = np.cov(gen_samples)
+    plt.imshow(cov_est , norm='symlog')
+    plt.suptitle("Values of the estimated covariance matrix")
+    plt.colorbar()
+    plt.show()
+
+    cov_target = noise_cov_gen_theoretical(k, sig)
+    plt.imshow(np.abs(cov_est - cov_target), norm='log')
+    plt.suptitle("Estimation error for generalized noise covariance")
+    plt.colorbar()
+    plt.show()
+
+
+    cov_target = noise_cov_gen_theoretical(k, sig)
+    plt.imshow(np.abs(cov_est - cov_target) / np.max(np.abs(np.array([cov_est, cov_target])), axis=0))
+    plt.suptitle("Relative estimation error for generalized noise covariance")
+    plt.colorbar()
+    plt.show()
+
+
+def noise_cov_gen_theoretical_friston(n, sig):
+    # Theoretical covariance of noise in generalized coordinates, based on
+    # symbolic computations of derivatives
+    #
+    # This follows eq. 52 of Friston's DEM paper
+    x = sym.Symbol('x')
+    sig_ = sym.Symbol('sigma')
+    kern_sym = sym.exp(-((x)/sig)**2/4)
+
+    matr = np.empty((n, n))
+    for i in range(n):
+        for j in range(n):
+            if (i + j) % 2 == 1:
+                matr[i, j] = 0
+            else:
+                diff_to = i + j
+                diffed = sym.diff(kern_sym, (sym.Symbol('x'), diff_to))
+                sign = -2 * ((i % 2) == 1) + 1
+                matr[i, j] = sign * diffed.evalf(subs={x: 0, sig_: sig})
+    return matr
+
+
+def test_noise_conv():
+    n = 1000
+    dt = 0.1
+    xs = np.arange(n) * dt
+    random_state = 5
+    var = 1
+    sig = 1
+    rng = np.random.default_rng(random_state)
+
+    kern_size = 200
+    n_samples = 5000
+    samples = np.vstack([generate_noise_conv(n, dt, var, sig, kern_size, rng=rng) for _ in range(n_samples)]).T
+
+    ## Taylor inversion
+    k = 9
+    mat = taylor_mat(k - 1, dt)
+    gen_samples = []
+    for i in range(0, samples.shape[0] - k):
+        gen_sample = np.linalg.inv(mat) @ samples[i:(i + k), :]
+        gen_samples.append(gen_sample)
+    gen_samples = np.hstack(gen_samples)
+
+    cov_est = np.cov(gen_samples)
+    cov_est_norm = cov_est / cov_est[0, 0]
+    plt.imshow(cov_est_norm, norm='symlog')
+    plt.suptitle("Values of the estimated covariance matrix")
+    plt.colorbar()
+    plt.show()
+
+    cov_target = noise_cov_gen_theoretical_friston(k, sig)
+    plt.imshow(np.abs(cov_est_norm - cov_target), norm='log')
+    plt.suptitle("Estimation error for generalized noise covariance")
+    plt.colorbar()
+    plt.show()
+
+
+    cov_target = noise_cov_gen_theoretical_friston(k, sig)
+    plt.imshow(np.abs(cov_est_norm - cov_target) / np.max(np.abs(np.array([cov_est_norm, cov_target])), axis=0))
+    plt.suptitle("Relative estimation error for generalized noise covariance")
+    plt.colorbar()
+    plt.show()
+
+
+
 
 if __name__ == '__main__':
     plot_taylor_approx_for_sin_cos()
     plot_taylor_inv_for_sin()
+    test_noise_gp_gen()
+    test_noise_stochastic_gen()
