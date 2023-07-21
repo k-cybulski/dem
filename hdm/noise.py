@@ -1,11 +1,8 @@
+from math import ceil
+
 import numpy as np
-from scipy.stats import multivariate_normal
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, ConstantKernel
-
-import sympy as sym
-
-from functools import cache
 
 ## Generating autocorrelated noise
 # Method 1: Generate noise from a Gaussian process
@@ -37,7 +34,7 @@ def generate_noise_conv(n, dt, var, sig, kern_size=None, rng=None):
     elif not isinstance(rng, np.random.Generator):
         rng = np.random.default_rng(rng)
     if kern_size is None:
-        kern_size = int(150 / dt) # rule of thumb for relatively good approximation
+        kern_size = ceil(150 / dt) # rule of thumb for relatively good approximation
     kern = gaussian_conv_kern(kern_size, dt, sig)
     white_size = n + kern_size - 1
     white = np.random.normal(np.zeros(white_size), 1)
