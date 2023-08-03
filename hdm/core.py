@@ -62,6 +62,6 @@ def deriv_mat(p, n):
 
     Args:
         p: number of derivatives
-        n: number of
+        n: number of terms
     """
-    return np.eye(p)[1:, 0:-1]
+    return np.kron(np.eye(p + 1, k=1), np.eye(n))
