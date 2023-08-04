@@ -34,26 +34,61 @@ def taylor_mat(p, dt, m=1, inv=False):
     if inv:
         matr = np.linalg.inv(matr)
     if m > 1:
+        # Doing this would follow the notation of [1] (Eq. 8)
+        # however, this requires that the input is just a vector of interleaved features like
+        # [x1 y1 x2 y2 x3 y3 ...].T but it's not clear that is the notation we should stick to?
+        raise NotImplementedError("Don't use this.")
         matr = np.kron(matr, np.eye(m))
     return matr
 
 
-def iterate_generalized(y, dt, p):
+def weave_gen(matr):
+    """
+    Transforms a matrix where each column is a vector in generalized
+    coordinates into one, tall vector in generalized coords which is
+    'interweaved' from the columns. So, it turns a matrix
+
+        x1  x2  x3
+        x1' x2' x3'
+
+    into vector [x1 x2 x3 x1' x2' x3'].T
+    """
+    # NOTE: This might all be kind of pointless?
+    # https://stackoverflow.com/a/5347492
+    # out = np.empty((matr.shape[0] * matr.shape[1], 1), dtype=matr.dtype)
+    # for col in range(matr.shape[1]):
+    #     out[col::2, 0] = matr[:, col]
+    # return out
+    return matr.reshape((matr.shape[0] * matr.shape[1], 1))
+
+
+def iterate_generalized(y, dt, p, p_comp=None):
     """
     Generate approximate vectors of y in generalized coordinates from a
     timeseries of y. The vectors are of size p + 1 (p derivatives and 1 value
     at midpoint).
 
     y is expected to have each column as one timeseries/one coordinate.
+
+    To improve numerical accuracy, we can compute more derivatives than we
+    return. The greatest derivatives are usually estimated badly, but using a
+    larger Taylor matrix improves approximation. So, p_comp allows to compute
+    more derivatives than are returned, in order to improve the accuracy of
+    those which are returned. [TODO: Is this really true..?]
     """
+    if p_comp is None:
+        p_comp = p
+
     # TODO: vectorize?
     if y.ndim == 1:
         y = y.reshape((-1, 1))
 
-    mat = taylor_mat(p, dt, inv=True)
+    m = y.shape[1]
 
-    for i in range(0, y.shape[0] - p - 1):
-        yield mat @ y[i:(i + p + 1), :]
+    mat = taylor_mat(p_comp, dt, inv=True)
+
+    for i in range(0, y.shape[0] - p_comp - 1):
+        yield weave_gen((mat @ y[i:(i + p_comp + 1), :])[:(p + 1), :])
 
 
 def deriv_mat(p, n):
