@@ -14,6 +14,19 @@ plot = False
 
 # Part 0: Implement DEM
 
+def kron(A, B):
+    """
+    Kronecker product for matrices.
+
+    This is a replacement for Torch's `torch.kron`, which is broken and crashes
+    when called on an inverted matrix, similar to here:
+        https://github.com/pytorch/pytorch/issues/54135
+
+    Taken from Anton Obukhov's comment on GitHub:
+        https://github.com/pytorch/pytorch/issues/74442#issuecomment-1111468515
+    """
+    return (A[:, None, :, None] * B[None, :, None, :]).reshape(A.shape[0] * B.shape[0], A.shape[1] * B.shape[1])
+
 def _fix_grad_shape(tensor):
     """
     "Fixes" shape for outputs of torch.autograd.functional.jacobian or
@@ -111,8 +124,8 @@ def internal_energy_dynamic(
         mu_lambda_w = mu_lambda[m_x:]
         prec_w = torch.exp(mu_lambda_w) * omega_w
         prec_z = torch.exp(mu_lambda_z) * omega_z
-        prec_w_tilde = torch.kron(noise_autocorr_inv, prec_w)
-        prec_z_tilde = torch.kron(noise_autocorr_inv, prec_z)
+        prec_w_tilde = kron(noise_autocorr_inv, prec_w)
+        prec_z_tilde = kron(noise_autocorr_inv, prec_z)
 
         # TODO: Optimize this diagonalization?
         err_dynamic = torch.vstack([err_y, err_v, err_x])
@@ -271,7 +284,7 @@ class DEMInput:
         return iterate_generalized(self.eta_v, self.dt, self.p)
 
     def iter_p_v_tildes(self):
-        p_v_tilde = torch.kron(self.v_autocorr_inv, self.p_v)
+        p_v_tilde = kron(self.v_autocorr_inv, self.p_v)
         return repeat(p_v_tilde, self.n)
 
 
