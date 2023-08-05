@@ -39,7 +39,16 @@ def _fix_grad_shape(tensor):
     # I'm guessing that this is because PyTorch can be very flexible in the
     # input/output shapes, also considering cases like minibatches. For now,
     # this solution *seems* to work (for no minibatches)
-    return tensor.reshape((tensor.shape[0], tensor.shape[2]))
+
+    # It seems that if the parameters are a (n, 1) matrix, then the Hessian has
+    # 4 dimensions (n, 1, n, 1)
+    # if the parameters are a (n,) array, then the Hessian has 2 dimensions (n, n)
+    if tensor.dim() == 2:
+        return tensor
+    elif tensor.dim() == 4 and tensor.shape[1] == 1 and tensor.shape[3] == 1:
+        return tensor.reshape((tensor.shape[0], tensor.shape[2]))
+    else:
+        raise ValueError("Unexpected hessian shape")
 
 def generalized_func(func, mu_x_tilde, mu_v_tilde, m_x, m_v, p, params):
     """
@@ -55,6 +64,9 @@ def generalized_func(func, mu_x_tilde, mu_v_tilde, m_x, m_v, p, params):
         p (int): numer of derivatives in generalized vectors
         params (Tensor): parameters of func
     """
+    # TODO: Ensure correctness of shapes, e.g. shape (2, 1) instead of (2,). This causes lots of errors down the road.
+    assert mu_x_tilde.shape == (m_x * (p + 1), 1)
+    assert mu_v_tilde.shape == (m_v * (p + 1), 1)
     mu_x = mu_x_tilde[:m_x]
     mu_v = mu_v_tilde[:m_v]
     func_appl = func(mu_x, mu_v, params)
@@ -62,7 +74,7 @@ def generalized_func(func, mu_x_tilde, mu_v_tilde, m_x, m_v, p, params):
     mu_x_grad = _fix_grad_shape(mu_x_grad)
     mu_v_grad = _fix_grad_shape(mu_v_grad)
     func_appl_d = []
-    for deriv in range(1, p):
+    for deriv in range(1, p + 1):
         mu_x_d = mu_x_tilde[deriv*m_x:(deriv+1)*m_x]
         mu_v_d = mu_v_tilde[deriv*m_v:(deriv+1)*m_v]
         func_appl_d.append(mu_x_grad @ mu_x_d + mu_v_grad @ mu_v_d)
@@ -76,12 +88,12 @@ def hessian_and_value(func, argnums):
     return torch.func.jacfwd(torch.func.jacrev(func_double, argnums=argnums, has_aux=True), argnums=argnums, has_aux=True)
 
 def _int_eng_par_static(
-        mu_theta,
-        eta_theta,
-        p_theta
+        mu,
+        eta,
+        p
     ):
-    err_theta = mu_theta - eta_theta
-    return (-err_theta.T @ p_theta @ err_theta + torch.logdet(p_theta)) / 2
+    err = mu - eta
+    return (-err.T @ p @ err + torch.logdet(p)) / 2
 
 def internal_energy_static(
         mu_theta,
@@ -94,14 +106,16 @@ def internal_energy_static(
     # Computes some terms of the internal energy along with necessary Hessians
     u_c_theta = _int_eng_par_static(mu_theta, eta_theta, p_theta)
     u_c_lambda = _int_eng_par_static(mu_lambda, eta_lambda, p_lambda)
+    u_c = u_c_theta + u_c_lambda
 
     u_c_theta_dd = torch.autograd.functional.hessian(lambda mu: _int_eng_par_static(mu, eta_theta, p_theta), mu_theta, create_graph=True)
     u_c_lambda_dd = torch.autograd.functional.hessian(lambda mu: _int_eng_par_static(mu, eta_lambda, p_lambda), mu_lambda, create_graph=True)
     return u_c, u_c_theta_dd, u_c_lambda_dd
 
 def internal_energy_dynamic(
-        g, f, mu_x_tilde, mu_v_tilde, m_x, m_v, p, mu_theta, eta_v_tilde,
-        mu_lambda, omega_w, omega_z, prec_w, prec_z):
+        g, f, mu_x_tilde, mu_v_tilde, y_tilde, m_x, m_v, p, mu_theta, eta_v_tilde, p_v_tilde,
+        mu_lambda, omega_w, omega_z):
+    deriv_mat_x = torch.from_numpy(deriv_mat(p, m_x)).to(dtype=torch.float32)
     # make a temporary function which we can use to compute hessians w.r.t. the relevant parameters
     # for the computation of mean-field terms
     def _int_eng_dynamic(mu_x_tilde, mu_v_tilde, mu_theta, mu_lambda):
@@ -110,18 +124,12 @@ def internal_energy_dynamic(
 
         err_y = y_tilde - g_tilde
         err_v = mu_v_tilde - eta_v_tilde
-        err_x = deriv_mat(p, m_x) @ mu_x_tilde - f_tilde
+        err_x = deriv_mat_x @ mu_x_tilde - f_tilde
 
         # we need to split up mu_lambda into the hyperparameter for noise of states and of outputs
-        # how many elements do the noise terms contain?
-        # for z (state noise), it must be the same as number of states, so m_x
-        # for w (output noise), it depends on the output of the function g, so
-        # we could do
-        #  m_w = g_tilde.shape[0] // p
-        # but we can also take it as the remainder of mu_lambda after splitting
-        # out mu_lambda_z
-        mu_lambda_z = mu_lambda[:m_x]
-        mu_lambda_w = mu_lambda[m_x:]
+        # the hyperparameters are just a single lambda scalar, one for the states and one for the outputs
+        mu_lambda_z = mu_lambda[0]
+        mu_lambda_w = mu_lambda[1]
         prec_w = torch.exp(mu_lambda_w) * omega_w
         prec_z = torch.exp(mu_lambda_z) * omega_z
         prec_w_tilde = kron(noise_autocorr_inv, prec_w)
@@ -140,8 +148,8 @@ def internal_energy_dynamic(
     u_t_theta_dd = torch.autograd.functional.hessian(lambda mu: _int_eng_dynamic(mu_x_tilde, mu_v_tilde, mu, mu_lambda), mu_theta, create_graph=True)
     u_t_lambda_dd = torch.autograd.functional.hessian(lambda mu: _int_eng_dynamic(mu_x_tilde, mu_v_tilde, mu_theta, mu), mu_lambda, create_graph=True)
 
-    u_t_x_tilde_d = _fix_grad_shape(u_t_x_tilde_d)
-    u_t_v_tilde_d = _fix_grad_shape(u_t_v_tilde_d)
+    u_t_x_tilde_dd = _fix_grad_shape(u_t_x_tilde_dd)
+    u_t_v_tilde_dd = _fix_grad_shape(u_t_v_tilde_dd)
     u_t_theta_dd  = _fix_grad_shape(u_t_theta_dd )
     u_t_lambda_dd = _fix_grad_shape(u_t_lambda_dd)
 
@@ -206,8 +214,8 @@ def free_action(
                     strict=True)
             ):
         u_t, u_t_x_tilde_dd, u_t_v_tilde_dd, u_t_theta_dd, u_t_lambda_dd = internal_energy_dynamic(
-            g, f, mu_x_tilde, mu_v_tilde, m_x, m_v, p, mu_theta, eta_v_tilde,
-            mu_lambda, omega_w, omega_z, prec_w, prec_z)
+            g, f, mu_x_tilde, mu_v_tilde, y_tilde, m_x, m_v, p, mu_theta, eta_v_tilde, p_v_tilde,
+            mu_lambda, omega_w, omega_z)
 
         # mean-field terms
         w_x_tilde, w_v_tilde, w_theta, w_lambda = [
@@ -239,6 +247,7 @@ class DEMInput:
     m_v: int
     # how many derivatives to track
     p: int
+    p_comp: int # can be equal to p or greater
 
     # system output
     ys: torch.Tensor
@@ -276,16 +285,20 @@ class DEMInput:
         self.n = self.ys.shape[0]
         self.theta0 = self.eta_theta if self.theta0 is None else self.theta0
         self.lambda0 = self.eta_lambda if self.lambda0 is None else self.lambda0
+        if self.p_comp is None:
+            self.p_comp = self.p
+        # FIXME: Do it more efficiently! It's easy
+        self._iter_length = len(list(self.iter_y_tildes()))
 
     def iter_y_tildes(self):
-        return iterate_generalized(self.ys, self.dt, self.p)
+        return iterate_generalized(self.ys, self.dt, self.p, p_comp=self.p_comp)
 
     def iter_eta_v_tildes(self):
-        return iterate_generalized(self.eta_v, self.dt, self.p)
+        return iterate_generalized(self.eta_v, self.dt, self.p, p_comp=self.p_comp)
 
     def iter_p_v_tildes(self):
         p_v_tilde = kron(self.v_autocorr_inv, self.p_v)
-        return repeat(p_v_tilde, self.n)
+        return repeat(p_v_tilde, self._iter_length)
 
 
 @dataclass
@@ -402,10 +415,10 @@ def f(t, x):
 out = solve_ivp(f, t_span, x0, t_eval=ts)
 
 # System
-xs = out.y.T
-ys = xs + zs
+xs = torch.tensor(out.y.T, dtype=torch.float32)
+ys = torch.tensor(xs + zs, dtype=torch.float32)
 
-vs = np.zeros((ys.shape[0], 2))
+vs = torch.zeros((ys.shape[0], 2), dtype=torch.float32)
 v_temporal_sig = 1
 
 if plot:
@@ -428,10 +441,10 @@ p = 3
 p_comp = 8
 
 
-v_autocorr = torch.tensor(noise_cov_gen_theoretical(p, sig=v_temporal_sig, autocorr=autocorr_friston()))
+v_autocorr = torch.tensor(noise_cov_gen_theoretical(p, sig=v_temporal_sig, autocorr=autocorr_friston()), dtype=torch.float32)
 v_autocorr_inv = torch.linalg.inv(v_autocorr)
 
-noise_autocorr = torch.tensor(noise_cov_gen_theoretical(p, sig=noise_temporal_sig, autocorr=autocorr_friston()))
+noise_autocorr = torch.tensor(noise_cov_gen_theoretical(p, sig=noise_temporal_sig, autocorr=autocorr_friston()), dtype=torch.float32)
 noise_autocorr_inv = torch.linalg.inv(noise_autocorr)
 
 omega_w = torch.eye(2)
@@ -442,39 +455,40 @@ dem_input = DEMInput(
     m_x=2,
     m_v=2, ### <- will always be 0 anyway, just putting it in here to make it simple
     p=p,
-    ys=torch.tensor(ys),
-    eta_v=torch.tensor(vs),
+    p_comp=p_comp,
+    ys=ys,
+    eta_v=vs,
     p_v=torch.eye(2),
     v_autocorr_inv=v_autocorr_inv,
-    eta_theta=torch.tensor([0, 0, 0, 0]),
-    eta_lambda=torch.tensor([[0, 0]]),
-    p_theta=torch.eye(4),
-    p_lambda=torch.eye(2),
+    eta_theta=torch.tensor([0, 0, 0, 0], dtype=torch.float32),
+    eta_lambda=torch.tensor([0, 0], dtype=torch.float32),
+    p_theta=torch.eye(4, dtype=torch.float32),
+    p_lambda=torch.eye(2, dtype=torch.float32),
     g=dem_g,
     f=dem_f,
-    omega_w=torch.eye(2),
-    omega_z=torch.eye(2),
+    omega_w=torch.eye(2, dtype=torch.float32),
+    omega_z=torch.eye(2, dtype=torch.float32),
     noise_autocorr_inv=noise_autocorr_inv,
-    x0=torch.tensor([0,0]),
-    theta0=torch.tensor([0, 0, 0, 0]),
-    lambda0=torch.tensor([0, 0])
+    x0=torch.tensor([0,0], dtype=torch.float32),
+    theta0=torch.tensor([0, 0, 0, 0], dtype=torch.float32),
+    lambda0=torch.tensor([0, 0], dtype=torch.float32)
         )
 
 # ideal parameters and states
 ideal_mu_x_tildes = list(iterate_generalized(xs, dt, p, p_comp=p_comp))
-ideal_mu_v_tildes = list(repeat(torch.tensor([0,0] * p), len(ideal_mu_x_tildes)))
-ideal_sig_x_tildes = list(repeat(torch.eye(m_x * p), len(ideal_mu_x_tildes))) # uhh this probably isn't the ideal
-ideal_sig_v_tildes = list(repeat(torch.eye(m_x * p), len(ideal_mu_x_tildes))) # uhh this probably isn't the ideal
+ideal_mu_v_tildes = list(repeat(torch.zeros((2 * (p + 1), 1), dtype=torch.float32), len(ideal_mu_x_tildes)))
+ideal_sig_x_tildes = list(repeat(torch.eye(m_x * (p + 1)), len(ideal_mu_x_tildes))) # uhh this probably isn't the ideal
+ideal_sig_v_tildes = list(repeat(torch.eye(m_v * (p + 1)), len(ideal_mu_x_tildes))) # uhh this probably isn't the ideal
 
 if plot:
     l = np.hstack(ideal_x_tildes).T
     plt.plot(l[:, 0::2])
     plt.show()
 
-ideal_mu_theta = A
-ideal_sig_theta = torch.eye(2) * 0.01
+ideal_mu_theta = torch.tensor(A).reshape(-1).to(dtype=torch.float32)
+ideal_sig_theta = torch.eye(4) * 0.01
 
-ideal_mu_lambda = np.log(0.1) * torch.tensor([1, 1]) # idk
+ideal_mu_lambda = torch.tensor([1, 1], dtype=torch.float32) * np.log(0.1) # idk
 ideal_sig_lambda = torch.eye(2) * 0.01
 
 # a well-fitted model with hopefully low free action
@@ -488,5 +502,8 @@ dem_state = DEMState(
         mu_lambda=ideal_mu_lambda,
         sig_theta=ideal_sig_theta,
         sig_lambda=ideal_sig_lambda)
+
+# Sanity checks!
+g_tilde = generalized_func(dem_g, ideal_mu_x_tildes[0], ideal_mu_v_tildes[0], m_x, m_v, p, ideal_mu_theta)
 
 f_bar = free_action_from_state(dem_state)

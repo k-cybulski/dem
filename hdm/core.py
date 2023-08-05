@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 from scipy.special import factorial
 
 def taylor_mat(p, dt, m=1, inv=False):
@@ -86,6 +87,8 @@ def iterate_generalized(y, dt, p, p_comp=None):
     m = y.shape[1]
 
     mat = taylor_mat(p_comp, dt, inv=True)
+    if isinstance(y, torch.Tensor):
+        mat = torch.from_numpy(mat).to(dtype=y.dtype)
 
     for i in range(0, y.shape[0] - p_comp - 1):
         yield weave_gen((mat @ y[i:(i + p_comp + 1), :])[:(p + 1), :])

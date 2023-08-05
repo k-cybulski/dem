@@ -65,7 +65,13 @@ def autocorr_friston():
     kern_sym = sym.exp(-((x)/sig)**2/4)
     return kern_sym
 
-def noise_cov_gen_theoretical(n, sig, autocorr):
+def noise_cov_gen_theoretical(p, sig, autocorr):
+    """
+    Theoretical covariance of a noise signal as a vector in generalized
+    coordinates, if the noise has a temporal autocorrelation given by symbolic
+    function `autocorr` with bandwidth `sig`.
+    """
+    n = p + 1
     matr = np.empty((n, n))
     for i in range(n):
         for j in range(n):
