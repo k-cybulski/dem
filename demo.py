@@ -11,7 +11,6 @@ from hdm.core import deriv_mat, iterate_generalized
 from hdm.noise import generate_noise_conv, autocorr_friston, noise_cov_gen_theoretical
 
 plot = False
-plot = True
 
 # Part 0: Implement DEM
 
@@ -136,15 +135,16 @@ def internal_energy_dynamic(
         # the hyperparameters are just a single lambda scalar, one for the states and one for the outputs
         mu_lambda_z = mu_lambda[0]
         mu_lambda_w = mu_lambda[1]
-        prec_w = torch.exp(mu_lambda_w) * omega_w
         prec_z = torch.exp(mu_lambda_z) * omega_z
-        prec_w_tilde = kron(noise_autocorr_inv, prec_w)
+        prec_w = torch.exp(mu_lambda_w) * omega_w
         prec_z_tilde = kron(noise_autocorr_inv, prec_z)
+        prec_w_tilde = kron(noise_autocorr_inv, prec_w)
 
-        # TODO: Optimize this diagonalization?
-        err_dynamic = torch.vstack([err_y, err_v, err_x])
-        prec_dynamic = torch.block_diag(prec_z_tilde, p_v_tilde, prec_w_tilde)
-        u_t = -(err_dynamic.T @ prec_dynamic @ err_dynamic + torch.logdet(prec_dynamic)) / 2
+        u_t_y_ = -err_y.T @ prec_z_tilde @ err_y + torch.logdet(prec_z_tilde)
+        u_t_v_ = -err_v.T @ p_v_tilde @ err_v + torch.logdet(p_v_tilde)
+        u_t_x_ = -err_x.T @ prec_w_tilde @ err_x + torch.logdet(prec_w_tilde)
+
+        u_t = (u_t_y_ + u_t_v_ + u_t_x_) / 2
         return u_t
     u_t = _int_eng_dynamic(mu_x_tilde, mu_v_tilde, mu_theta, mu_lambda)
     # horribly inefficient way to go about this, but hey, at least it may work...
@@ -453,9 +453,9 @@ x0 = np.array([0, 1])
 A = np.array([[0, 1], [-1, 0]])
 
 # noise standard deviations
-w_sd = 0.05
-z_sd = 1
-noise_temporal_sig = 0.25 # temporal smoothing kernel parameter
+w_sd = 0.01 # noise on states
+z_sd = 0.2 # noise on outputs
+noise_temporal_sig = 0.15 # temporal smoothing kernel parameter
 
 # Simulate the data
 # NOTE: Data are in shape (number of samples, number of features)
@@ -606,7 +606,7 @@ def dem_step_d(state: DEMState, lr):
                             state.input.iter_p_v_tildes(),
                             strict=True)):
         def dynamic_free_energy(mu_x_tilde_t, mu_v_tilde_t):
-            # free action as a function of lambda
+            # free action as a function of dynamic terms
             return free_action(
                 m_x=state.input.m_x,
                 m_v=state.input.m_v,
@@ -656,11 +656,12 @@ def dem_step_d(state: DEMState, lr):
     state.mu_v_tildes = mu_v_tildes
 
 
-def dem_step_m(state: DEMState, lr_lambda, iter_lambda):
+def dem_step_m(state: DEMState, lr_lambda, iter_lambda, min_improv=0.01):
     """
     Performs the noise hyperparameter update (step M) of DEM.
     """
     # FIXME: Do 'until convergence' rather than 'for some fixed number of steps'
+    last_f_bar = None
     for i in range(iter_lambda):
         def lambda_free_action(mu_lambda):
             # free action as a function of lambda
@@ -695,6 +696,12 @@ def dem_step_m(state: DEMState, lr_lambda, iter_lambda):
         lambda_dd = lr_lambda * torch.autograd.functional.hessian(lambda_free_action, state.mu_lambda)
         step_matrix = (torch.matrix_exp(lambda_dd) - torch.eye(lambda_dd.shape[0])) @ torch.linalg.inv(lambda_dd)
         state.mu_lambda = state.mu_lambda + step_matrix @ lambda_d
+        # convergence check
+        if last_f_bar is not None:
+            if last_f_bar + min_improv > f_bar:
+                print("  reached improvement threshold")
+                break
+        last_f_bar = f_bar.clone().detach()
 
 
 def dem_step_e(state: DEMState, lr_theta):
@@ -703,6 +710,7 @@ def dem_step_e(state: DEMState, lr_theta):
     """
     # TODO: should be an if statement comparing new f_bar with old
     def theta_free_action(mu_theta):
+        # free action as a function of theta
         return free_action(
             m_x=state.input.m_x,
             m_v=state.input.m_v,
@@ -810,22 +818,25 @@ dem_state = test_state()
 lr_dynamic = 1
 lr_theta0 = 0.5
 lr_lambda0 = 0.01
+iter_lambda = 20
+iter_dem = 50
 
 mu_xss = []
 mu_vss = []
 
 # DEM procedure
-for i in range(8):
+for i in range(iter_dem):
     f_bar = free_action_from_state(dem_state)
     print(f"{i}. {f_bar.item()}")
-    print(f"""[ {dem_state.mu_theta[0]:.3f}, {dem_state.mu_theta[1]:.3f},
-  {dem_state.mu_theta[2]:.3f}, {dem_state.mu_theta[3]:.3f} ]""")
+    print(f"""  theta = [ {dem_state.mu_theta[0]:.3f}, {dem_state.mu_theta[1]:.3f},
+          {dem_state.mu_theta[2]:.3f}, {dem_state.mu_theta[3]:.3f} ]""")
+    print(f"""  mu_lambda_z = {dem_state.mu_lambda[0]:.3f}, mu_lambda_w = {dem_state.mu_lambda[1]:.3f}""")
     dem_step_d(dem_state, lr=lr_dynamic)
     mu_xs, mu_vs, idx_first, idx_last = extract_dynamic(dem_state)
     mu_xss.append(mu_xs)
     mu_vss.append(mu_vs)
     f_bar = free_action_from_state(dem_state)
     print(f"  (D). {f_bar.item()}")
-    dem_step_m(dem_state, lr_lambda=lr_lambda0, iter_lambda=30)
+    dem_step_m(dem_state, lr_lambda=lr_lambda0, iter_lambda=iter_lambda)
     dem_step_e(dem_state, lr_theta=lr_theta0)
     dem_step_precision(dem_state)
