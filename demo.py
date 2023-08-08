@@ -11,6 +11,7 @@ from hdm.core import deriv_mat, iterate_generalized
 from hdm.noise import generate_noise_conv, autocorr_friston, noise_cov_gen_theoretical
 
 plot = False
+plot = True
 
 # Part 0: Implement DEM
 
@@ -177,7 +178,7 @@ def internal_action(
         m_x, m_v, p,
 
         mu_x_tildes, mu_v_tildes,
-        sig_x_tildes, sig_v_tildes,
+        sig_x_tilde, sig_v_tilde,
         y_tildes,
         eta_v_tildes, p_v_tildes,
         omega_w, omega_z, noise_autocorr_inv
@@ -198,11 +199,9 @@ def internal_action(
     u_t_x_tilde_dds = []
     u_t_v_tilde_dds = []
     for t, (mu_x_tilde, mu_v_tilde,
-            sig_x_tilde, sig_v_tilde,
             y_tilde,
             eta_v_tilde, p_v_tilde) in enumerate(
                 zip(mu_x_tildes, mu_v_tildes,
-                    sig_x_tildes, sig_v_tildes,
                     y_tildes,
                     eta_v_tildes, p_v_tildes,
                     strict=True)
@@ -217,7 +216,6 @@ def internal_action(
         u_t_v_tilde_dds.append(u_t_v_tilde_dd)
     return u, u_theta_dd, u_lambda_dd, u_t_x_tilde_dds, u_t_v_tilde_dds
 
-
 def free_action(
         # how many terms are there in mu_x and mu_v?
         m_x, m_v,
@@ -227,7 +225,7 @@ def free_action(
 
         # dynamic terms
         mu_x_tildes, mu_v_tildes, # iterator of state and input mean estimates in generalized coordinates
-        sig_x_tildes, sig_v_tildes, # like above, but covariance estimates
+        sig_x_tilde, sig_v_tilde, # covariance estimates
         y_tildes, # iterator of outputs in generalized coordinates
         eta_v_tildes, p_v_tildes, # iterator of input mean priors
 
@@ -265,14 +263,11 @@ def free_action(
         compute_dds=True
     )
     f_c = u_c + (torch.logdet(sig_theta) + torch.logdet(sig_lambda)) / 2
-    f_t = []
-
+    f_tsum = 0
     for t, (mu_x_tilde, mu_v_tilde,
-            sig_x_tilde, sig_v_tilde,
             y_tilde,
             eta_v_tilde, p_v_tilde) in enumerate(
                 zip(mu_x_tildes, mu_v_tildes,
-                    sig_x_tildes, sig_v_tildes,
                     y_tildes,
                     eta_v_tildes, p_v_tildes,
                     strict=True)
@@ -291,10 +286,10 @@ def free_action(
                     (sig_lambda, u_c_lambda_dd, u_t_lambda_dd),
                 ]
             ]
-        f_t.append(
-            u_t + (torch.logdet(sig_x_tilde) + torch.logdet(sig_v_tilde)) / 2
-            )
-    f_bar = f_c + sum(f_t)
+        f_tsum += u_t \
+                + (torch.logdet(sig_x_tilde) + torch.logdet(sig_v_tilde)) / 2 \
+                + w_x_tilde + w_v_tilde + w_theta + w_lambda
+    f_bar = f_c + f_tsum
     return f_bar
 
 @dataclass
@@ -337,18 +332,10 @@ class DEMInput:
     omega_z: torch.Tensor
     noise_autocorr_inv: torch.Tensor
 
-    # Initial parameters
-    # TODO: How to initialize parameters and x?
-    x0: torch.Tensor
-    theta0: torch.Tensor
-    lambda0: torch.Tensor
-
     def __post_init__(self):
         if self.ys.ndim == 1:
             self.ys = self.ys.reshape((-1, 1))
         self.n = self.ys.shape[0]
-        self.theta0 = self.eta_theta if self.theta0 is None else self.theta0
-        self.lambda0 = self.eta_lambda if self.lambda0 is None else self.lambda0
         if self.p_comp is None:
             self.p_comp = self.p
         # FIXME: Do it more efficiently! It's easy
@@ -377,8 +364,8 @@ class DEMState:
     # dynamic state estimates
     mu_x_tildes: Iterable[torch.Tensor]
     mu_v_tildes: Iterable[torch.Tensor]
-    sig_x_tildes: Iterable[torch.Tensor]
-    sig_v_tildes: Iterable[torch.Tensor]
+    sig_x_tilde: torch.Tensor
+    sig_v_tilde: torch.Tensor
 
     # static parameter and hyperparameter estimates
     mu_theta: torch.Tensor
@@ -386,17 +373,16 @@ class DEMState:
     sig_theta: torch.Tensor
     sig_lambda: torch.Tensor
 
+    # initial dynamic states
+    mu_x0_tilde: torch.Tensor
+    mu_v0_tilde: torch.Tensor
+
     def iter_mu_x_tildes(self):
         yield from self.mu_x_tildes
 
     def iter_mu_v_tildes(self):
         yield from self.mu_v_tildes
 
-    def iter_sig_x_tildes(self):
-        yield from self.sig_x_tildes
-
-    def iter_sig_v_tildes(self):
-        yield from self.sig_v_tildes
 
 def free_action_from_state(state: DEMState):
     return free_action(
@@ -405,8 +391,8 @@ def free_action_from_state(state: DEMState):
             p=state.input.p,
             mu_x_tildes=state.iter_mu_x_tildes(),
             mu_v_tildes=state.iter_mu_v_tildes(),
-            sig_x_tildes=state.iter_sig_x_tildes(),
-            sig_v_tildes=state.iter_sig_v_tildes(),
+            sig_x_tilde=state.sig_x_tilde,
+            sig_v_tilde=state.sig_v_tilde,
             y_tildes=state.input.iter_y_tildes(),
             eta_v_tildes=state.input.iter_eta_v_tildes(),
             p_v_tildes=state.input.iter_p_v_tildes(),
@@ -443,8 +429,8 @@ def internal_action_from_state(state: DEMState):
 
             mu_x_tildes=state.iter_mu_x_tildes(),
             mu_v_tildes=state.iter_mu_v_tildes(),
-            sig_x_tildes=state.iter_sig_x_tildes(),
-            sig_v_tildes=state.iter_sig_v_tildes(),
+            sig_x_tilde=state.sig_x_tilde,
+            sig_v_tilde=state.sig_v_tilde,
             y_tildes=state.input.iter_y_tildes(),
             eta_v_tildes=state.input.iter_eta_v_tildes(),
             p_v_tildes=state.input.iter_p_v_tildes(),
@@ -466,13 +452,15 @@ def internal_action_from_state(state: DEMState):
 x0 = np.array([0, 1])
 A = np.array([[0, 1], [-1, 0]])
 
-noise_sd = 0.05
-noise_temporal_sig = 0.5 # temporal smoothing kernel parameter
+# noise standard deviations
+w_sd = 0.05
+z_sd = 1
+noise_temporal_sig = 0.25 # temporal smoothing kernel parameter
 
 # Simulate the data
 # NOTE: Data are in shape (number of samples, number of features)
 t_start = 0
-t_end = 10
+t_end = 2
 t_span = (t_start, t_end)
 dt = 0.1
 ts = np.arange(start=t_start, stop=t_end, step=dt)
@@ -487,11 +475,11 @@ m_v = 2
 seed = 546
 rng = np.random.default_rng(seed)
 ws = np.vstack([
-        generate_noise_conv(n, dt, noise_sd ** 2, noise_temporal_sig, rng=rng)
+        generate_noise_conv(n, dt, w_sd ** 2, noise_temporal_sig, rng=rng)
         for _ in range(m_x)
     ]).T
 zs = np.vstack([
-        generate_noise_conv(n, dt, noise_sd ** 2, noise_temporal_sig, rng=rng)
+        generate_noise_conv(n, dt, z_sd ** 2, noise_temporal_sig, rng=rng)
         for _ in range(m_x)
     ]).T
 
@@ -530,7 +518,7 @@ def dem_g(x, v, params):
 
 # Part 2: Define a DEM model
 p = 3
-p_comp = 8
+p_comp = 6
 
 
 v_autocorr = torch.tensor(noise_cov_gen_theoretical(p, sig=v_temporal_sig, autocorr=autocorr_friston()), dtype=torch.float32)
@@ -561,26 +549,26 @@ dem_input = DEMInput(
     omega_w=torch.eye(2, dtype=torch.float32),
     omega_z=torch.eye(2, dtype=torch.float32),
     noise_autocorr_inv=noise_autocorr_inv_,
-    x0=torch.tensor([[0],[0]], dtype=torch.float32),
-    theta0=torch.tensor([0, 0, 0, 0], dtype=torch.float32),
-    lambda0=torch.tensor([0, 0], dtype=torch.float32)
         )
 
 # ideal parameters and states
 ideal_mu_x_tildes = list(iterate_generalized(xs, dt, p, p_comp=p_comp))
 ideal_mu_v_tildes = list(repeat(torch.zeros((2 * (p + 1), 1), dtype=torch.float32), len(ideal_mu_x_tildes)))
-ideal_sig_x_tildes = list(repeat(torch.eye(m_x * (p + 1)), len(ideal_mu_x_tildes))) # uhh this probably isn't the ideal
-ideal_sig_v_tildes = list(repeat(torch.eye(m_v * (p + 1)), len(ideal_mu_x_tildes))) # uhh this probably isn't the ideal
+ideal_sig_x_tilde = torch.eye(m_x * (p + 1)), len(ideal_mu_x_tildes) # uhh this probably isn't the ideal
+ideal_sig_v_tilde = torch.eye(m_v * (p + 1)), len(ideal_mu_x_tildes) # uhh this probably isn't the ideal
 
 if plot:
-    l = np.hstack(ideal_x_tildes).T
+    l = np.hstack(ideal_mu_x_tildes).T
     plt.plot(l[:, 0::2])
     plt.show()
 
-ideal_mu_theta = torch.tensor(A.reshape(-1), requires_grad=True, dtype=torch.float32)
+ideal_mu_x0_tilde = ideal_mu_x_tildes[0].clone()
+ideal_mu_v0_tilde = ideal_mu_v_tildes[0].clone()
+
+ideal_mu_theta = torch.tensor(A.reshape(-1), dtype=torch.float32)#, requires_grad=True)
 ideal_sig_theta = torch.eye(4) * 0.01
 
-ideal_mu_lambda = torch.tensor(np.ones(2)* np.log(0.1), requires_grad=True, dtype=torch.float32)  # idk
+ideal_mu_lambda = torch.tensor(np.ones(2)* np.log(0.1), dtype=torch.float32, requires_grad=True)  # idk
 ideal_sig_lambda = torch.eye(2) * 0.01
 
 # a well-fitted model with hopefully low free action
@@ -588,19 +576,90 @@ dem_state = DEMState(
         input=dem_input,
         mu_x_tildes=ideal_mu_x_tildes,
         mu_v_tildes=ideal_mu_v_tildes,
-        sig_x_tildes=ideal_sig_x_tildes,
-        sig_v_tildes=ideal_sig_v_tildes,
+        sig_x_tilde=ideal_sig_x_tilde,
+        sig_v_tilde=ideal_sig_v_tilde,
         mu_theta=ideal_mu_theta,
         mu_lambda=ideal_mu_lambda,
         sig_theta=ideal_sig_theta,
-        sig_lambda=ideal_sig_lambda)
+        sig_lambda=ideal_sig_lambda,
+        mu_x0_tilde=ideal_mu_x0_tilde,
+        mu_v0_tilde=ideal_mu_v0_tilde)
+
+def clear_gradients_on_state(state: DEMState):
+    state.mu_theta = state.mu_theta.detach().clone().requires_grad_()
+    state.mu_lambda = state.mu_lambda.detach().clone().requires_grad_()
 
 # Sanity checks!
-def dem_static_step(state: DEMState, lr_theta, lr_lambda, iter_lambda):
+def dem_step_d(state: DEMState, lr):
     """
-    Performs the M, E, and precision update steps of DEM.
+    Performs the D step of DEM.
     """
-    # D step
+    # FIXME: How should we optimize x0 and v0?
+    mu_x_tilde_t = state.mu_x0_tilde.clone().detach()
+    mu_v_tilde_t = state.mu_v0_tilde.clone().detach()
+    mu_x_tildes = [mu_x_tilde_t]
+    mu_v_tildes = [mu_v_tilde_t]
+    for t, (y_tilde,
+         eta_v_tilde, p_v_tilde) in enumerate(zip(
+                            state.input.iter_y_tildes(),
+                            state.input.iter_eta_v_tildes(),
+                            state.input.iter_p_v_tildes(),
+                            strict=True)):
+        def dynamic_free_energy(mu_x_tilde_t, mu_v_tilde_t):
+            # free action as a function of lambda
+            return free_action(
+                m_x=state.input.m_x,
+                m_v=state.input.m_v,
+                p=state.input.p,
+                mu_x_tildes=(mu_x_tilde_t,),
+                mu_v_tildes=(mu_v_tilde_t,),
+                sig_x_tilde=state.sig_x_tilde,
+                sig_v_tilde=state.sig_v_tilde,
+                y_tildes=(y_tilde,),
+                eta_v_tildes=(eta_v_tilde,),
+                p_v_tildes=(p_v_tilde,),
+                eta_theta=state.input.eta_theta,
+                eta_lambda=state.input.eta_lambda,
+                p_theta=state.input.p_theta,
+                p_lambda=state.input.p_lambda,
+                mu_theta=state.mu_theta,
+                mu_lambda=state.mu_lambda,
+                sig_theta=state.sig_theta,
+                sig_lambda=state.sig_lambda,
+                g=state.input.g,
+                f=state.input.f,
+                omega_w=state.input.omega_w,
+                omega_z=state.input.omega_z,
+                noise_autocorr_inv=state.input.noise_autocorr_inv)
+        # free action on just a single timestep
+        mu_x_tilde_t = mu_x_tilde_t.clone().detach().requires_grad_()
+        mu_v_tilde_t = mu_v_tilde_t.clone().detach().requires_grad_()
+        f_eng = dynamic_free_energy(mu_x_tilde_t, mu_v_tilde_t)
+        # NOTE: In the original pseudocode, x and v are in one vector
+        x_d = lr * torch.autograd.grad(f_eng, mu_x_tilde_t, retain_graph=True)[0]
+        v_d = lr * torch.autograd.grad(f_eng, mu_v_tilde_t)[0]
+        x_dd = lr * torch.autograd.functional.hessian(lambda mu: dynamic_free_energy(mu, mu_v_tilde_t), mu_x_tilde_t)
+        v_dd = lr * torch.autograd.functional.hessian(lambda mu: dynamic_free_energy(mu_x_tilde_t, mu), mu_v_tilde_t)
+        x_dd = _fix_grad_shape(x_dd)
+        v_dd = _fix_grad_shape(v_dd)
+        step_matrix_x = (torch.matrix_exp(x_dd) - torch.eye(x_dd.shape[0])) @ torch.linalg.inv(x_dd)
+        step_matrix_v = (torch.matrix_exp(v_dd) - torch.eye(v_dd.shape[0])) @ torch.linalg.inv(v_dd)
+        mu_x_tilde_t = mu_x_tilde_t + step_matrix_x @ x_d
+        mu_v_tilde_t = mu_v_tilde_t + step_matrix_v @ v_d
+        mu_x_tilde_t = mu_x_tilde_t.clone().detach()
+        mu_v_tilde_t = mu_v_tilde_t.clone().detach()
+        mu_x_tildes.append(mu_x_tilde_t)
+        mu_v_tildes.append(mu_v_tilde_t)
+    mu_x_tildes = mu_x_tildes[:-1] # there is one too many
+    mu_v_tildes = mu_v_tildes[:-1]
+    state.mu_x_tildes = mu_x_tildes
+    state.mu_v_tildes = mu_v_tildes
+
+
+def dem_step_m(state: DEMState, lr_lambda, iter_lambda):
+    """
+    Performs the noise hyperparameter update (step M) of DEM.
+    """
     # FIXME: Do 'until convergence' rather than 'for some fixed number of steps'
     for i in range(iter_lambda):
         def lambda_free_action(mu_lambda):
@@ -611,8 +670,8 @@ def dem_static_step(state: DEMState, lr_theta, lr_lambda, iter_lambda):
                 p=state.input.p,
                 mu_x_tildes=state.iter_mu_x_tildes(),
                 mu_v_tildes=state.iter_mu_v_tildes(),
-                sig_x_tildes=state.iter_sig_x_tildes(),
-                sig_v_tildes=state.iter_sig_v_tildes(),
+                sig_x_tilde=state.sig_x_tilde,
+                sig_v_tilde=state.sig_v_tilde,
                 y_tildes=state.input.iter_y_tildes(),
                 eta_v_tildes=state.input.iter_eta_v_tildes(),
                 p_v_tildes=state.input.iter_p_v_tildes(),
@@ -629,23 +688,29 @@ def dem_static_step(state: DEMState, lr_theta, lr_lambda, iter_lambda):
                 omega_w=state.input.omega_w,
                 omega_z=state.input.omega_z,
                 noise_autocorr_inv=state.input.noise_autocorr_inv)
+        clear_gradients_on_state(state)
         f_bar = free_action_from_state(state)
-        print(f"  {i} (lambda). {f_bar}")
+        print(f"  {i} (lambda). f_bar={f_bar.item():.4f}, lambda={state.mu_lambda}")
         lambda_d = lr_lambda * torch.autograd.grad(f_bar, state.mu_lambda)[0]
         lambda_dd = lr_lambda * torch.autograd.functional.hessian(lambda_free_action, state.mu_lambda)
         step_matrix = (torch.matrix_exp(lambda_dd) - torch.eye(lambda_dd.shape[0])) @ torch.linalg.inv(lambda_dd)
         state.mu_lambda = state.mu_lambda + step_matrix @ lambda_d
+
+
+def dem_step_e(state: DEMState, lr_theta):
+    """
+    Performs the parameter update (step E) of DEM.
+    """
     # TODO: should be an if statement comparing new f_bar with old
     def theta_free_action(mu_theta):
-        # free action as a function of lambda
         return free_action(
             m_x=state.input.m_x,
             m_v=state.input.m_v,
             p=state.input.p,
             mu_x_tildes=state.iter_mu_x_tildes(),
             mu_v_tildes=state.iter_mu_v_tildes(),
-            sig_x_tildes=state.iter_sig_x_tildes(),
-            sig_v_tildes=state.iter_sig_v_tildes(),
+            sig_x_tilde=state.sig_x_tilde,
+            sig_v_tilde=state.sig_v_tilde,
             y_tildes=state.input.iter_y_tildes(),
             eta_v_tildes=state.input.iter_eta_v_tildes(),
             p_v_tildes=state.input.iter_p_v_tildes(),
@@ -662,26 +727,105 @@ def dem_static_step(state: DEMState, lr_theta, lr_lambda, iter_lambda):
             omega_w=state.input.omega_w,
             omega_z=state.input.omega_z,
             noise_autocorr_inv=state.input.noise_autocorr_inv)
-    # E step
+    clear_gradients_on_state(state)
     f_bar = free_action_from_state(state)
     theta_d = lr_theta * torch.autograd.grad(f_bar, state.mu_theta)[0]
     theta_dd = lr_theta * torch.autograd.functional.hessian(theta_free_action, state.mu_theta)
     step_matrix = (torch.matrix_exp(theta_dd) - torch.eye(theta_dd.shape[0])) @ torch.linalg.inv(theta_dd)
     state.mu_theta = state.mu_theta + step_matrix @ theta_d
-    # Precision update
+
+
+def dem_step_precision(state: DEMState):
+    """
+    Does a precision update of DEM.
+    """
+    clear_gradients_on_state(state)
     u, u_theta_dd, u_lambda_dd, u_t_x_tilde_dds, u_t_v_tilde_dds = internal_action_from_state(state)
     state.sig_theta = torch.linalg.inv(-u_theta_dd)
     state.sig_lambda = torch.linalg.inv(-u_lambda_dd)
-    state.sig_x_tildes = [-torch.linalg.inv(u_t_x_tilde) for u_t_x_tilde in u_t_x_tilde_dds]
-    state.sig_v_tildes = [-torch.linalg.inv(u_t_v_tilde) for u_t_v_tilde in u_t_v_tilde_dds]
+    # FIXME: uh, should we do a mean over the hessians here?
+    state.sig_x_tilde = -torch.linalg.inv(torch.mean(torch.stack(u_t_x_tilde_dds, axis=0), 0))
+    state.sig_v_tilde = -torch.linalg.inv(torch.mean(torch.stack(u_t_v_tilde_dds, axis=0), 0))
 
-lr_theta = 0.0001
-lr_lambda = 0.0001
 
-dem_static_step(dem_state, lr_theta=lr_theta, lr_lambda=lr_lambda, iter_lambda=1)
+def dem_step(state: DEMState, lr_dynamic, lr_theta, lr_lambda, iter_lambda):
+    """
+    Does an iteration of DEM.
+    """
+    dem_step_d(state, lr_dynamic)
+    dem_step_m(state, lr_lambda, iter_lambda)
+    dem_step_e(state, lr_theta)
+    dem_step_precision()
 
-iter_lambda = 25
-for i in range(100):
+# # And some checks for sanity
+# lr = 0.1
+# for i in range(100):
+#     dem_state.mu_lambda.grad = None
+#     u, u_theta_dd, u_lambda_dd, u_t_x_tilde_dds, u_t_v_tilde_dds = internal_action_from_state(dem_state)
+#     print(f'{i}. {u}, {dem_state.mu_lambda}')
+#     grad = torch.autograd.grad(u, dem_state.mu_lambda)[0]
+#     dem_state.mu_lambda = (dem_state.mu_lambda + lr * grad)
+#     dem_state.mu_lambda.grad = None
+
+# print("Test step for crash...")
+# dem_static_step(dem_state, lr_theta=lr_theta, lr_lambda=lr_lambda, iter_lambda=1)
+
+# Starting parameters/hyperparameters, to see how well we can find the true ones
+mu_lambda0 = torch.tensor([0, 0], dtype=torch.float32)
+sig_lambda0 = torch.eye(2) * 0.01
+
+mu_theta0 = torch.tensor([0,0,0,0], dtype=torch.float32)
+sig_theta0 = torch.eye(4) * 0.01
+
+sig_x_tilde0 = torch.eye(m_x * (p + 1))
+sig_v_tilde0 = torch.eye(m_v * (p + 1))
+
+def test_state():
+    dem_state = DEMState(
+            input=dem_input,
+            mu_x_tildes=[mu_x_tilde.clone().detach() for mu_x_tilde in ideal_mu_x_tildes],
+            mu_v_tildes=[mu_v_tilde.clone().detach() for mu_v_tilde in ideal_mu_v_tildes],
+            sig_x_tilde=sig_x_tilde0.clone().detach(),
+            sig_v_tilde=sig_v_tilde0.clone().detach(),
+            mu_theta=mu_theta0.clone().detach(),
+            mu_lambda=mu_lambda0.clone().detach(),
+            sig_theta=sig_theta0.clone().detach(),
+            sig_lambda=sig_lambda0.clone().detach(),
+            mu_x0_tilde=ideal_mu_x0_tilde.clone().detach(),
+            mu_v0_tilde=ideal_mu_v0_tilde.clone().detach())
+    return dem_state
+
+# Do a single step to find optimal sigmas
+# dem_static_step(dem_state, lr_theta=0.01, lr_lambda0=0.01, iter_lambda=1)
+
+def extract_dynamic(state: DEMState):
+    mu_xs = torch.stack([mu_x_tilde[:state.input.m_x] for mu_x_tilde in state.mu_x_tildes], axis=0)[:,:,0]
+    mu_vs = torch.stack([mu_v_tilde[:state.input.m_v] for mu_v_tilde in state.mu_v_tildes], axis=0)[:,:,0]
+    idx_first = int(state.input.p_comp // 2)
+    idx_last = idx_first + len(state.mu_x_tildes)
+    return mu_xs, mu_vs, idx_first, idx_last
+
+dem_state = test_state()
+
+lr_dynamic = 1
+lr_theta0 = 0.5
+lr_lambda0 = 0.01
+
+mu_xss = []
+mu_vss = []
+
+# DEM procedure
+for i in range(8):
     f_bar = free_action_from_state(dem_state)
-    print(f"{i} (EM). {f_bar}")
-    dem_static_step(dem_state, lr_theta=lr_theta, lr_lambda=lr_lambda, iter_lambda=iter_lambda)
+    print(f"{i}. {f_bar.item()}")
+    print(f"""[ {dem_state.mu_theta[0]:.3f}, {dem_state.mu_theta[1]:.3f},
+  {dem_state.mu_theta[2]:.3f}, {dem_state.mu_theta[3]:.3f} ]""")
+    dem_step_d(dem_state, lr=lr_dynamic)
+    mu_xs, mu_vs, idx_first, idx_last = extract_dynamic(dem_state)
+    mu_xss.append(mu_xs)
+    mu_vss.append(mu_vs)
+    f_bar = free_action_from_state(dem_state)
+    print(f"  (D). {f_bar.item()}")
+    dem_step_m(dem_state, lr_lambda=lr_lambda0, iter_lambda=30)
+    dem_step_e(dem_state, lr_theta=lr_theta0)
+    dem_step_precision(dem_state)
