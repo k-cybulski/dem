@@ -693,7 +693,7 @@ def dem_step_m(state: DEMState, lr_lambda, iter_lambda, min_improv=0.01):
                 noise_autocorr_inv=state.input.noise_autocorr_inv)
         clear_gradients_on_state(state)
         f_bar = free_action_from_state(state)
-        print(f"  {i} (lambda). f_bar={f_bar.item():.4f}, lambda={state.mu_lambda}")
+        print(f"  (M) {i}. f_bar={f_bar.item():.4f}, lambda={state.mu_lambda}")
         lambda_d = lr_lambda * torch.autograd.grad(f_bar, state.mu_lambda)[0]
         lambda_dd = lr_lambda * torch.autograd.functional.hessian(lambda_free_action, state.mu_lambda)
         step_matrix = (torch.matrix_exp(lambda_dd) - torch.eye(lambda_dd.shape[0])) @ torch.linalg.inv(lambda_dd)
@@ -870,6 +870,24 @@ def test_state():
             mu_v0_tilde=ideal_mu_v0_tilde.clone().detach())
     return dem_state
 
+def clean_state():
+    """
+    A DEMState initialized with xs and vs at zero.
+    """
+    dem_state = DEMState(
+            input=dem_input,
+            mu_x_tildes=[torch.zeros_like(mu_x_tilde) for mu_x_tilde in ideal_mu_x_tildes],
+            mu_v_tildes=[torch.zeros_like(mu_v_tilde) for mu_v_tilde in ideal_mu_v_tildes],
+            sig_x_tilde=sig_x_tilde0.clone().detach(),
+            sig_v_tilde=sig_v_tilde0.clone().detach(),
+            mu_theta=mu_theta0.clone().detach(),
+            mu_lambda=mu_lambda0.clone().detach(),
+            sig_theta=sig_theta0.clone().detach(),
+            sig_lambda=sig_lambda0.clone().detach(),
+            mu_x0_tilde=torch.zeros_like(ideal_mu_x0_tilde),
+            mu_v0_tilde=torch.zeros_like(ideal_mu_v0_tilde))
+    return dem_state
+
 # Do a single step to find optimal sigmas
 # dem_static_step(dem_state, lr_theta=0.01, lr_lambda0=0.01, iter_lambda=1)
 
@@ -880,19 +898,25 @@ def extract_dynamic(state: DEMState):
     idx_last = idx_first + len(state.mu_x_tildes)
     return mu_xs, mu_vs, idx_first, idx_last
 
-dem_state = test_state()
+dem_state = clean_state()
 
 mu_xss = []
 mu_vss = []
+mu_thetas = []
+sig_thetas = []
+lr_thetas = []
+f_bars = []
 
 lr_dynamic = 1
-lr_theta0 = 0.5
-lr_lambda0 = 0.01
+lr_theta0 = 1
+lr_theta_rate_coeff = 20 # after how many steps does it get to half of lr_theta0
+lr_lambda = 0.01
 iter_lambda = 20
-iter_dem = 100
+iter_dem = 200
 
 # DEM procedure
 for i in range(iter_dem):
+    lr_theta = lr_theta_rate_coeff * lr_theta0 / (i + lr_theta_rate_coeff)
     f_bar = free_action_from_state(dem_state)
     print(f"{i}. {f_bar.item()}")
     print(f"""  theta = [ {dem_state.mu_theta[0]:.3f}, {dem_state.mu_theta[1]:.3f},
@@ -901,11 +925,16 @@ for i in range(iter_dem):
     print(f"""  x0 = [ {dem_state.mu_x0_tilde[0].item():.3f}, {dem_state.mu_x0_tilde[1].item():.3f} ]""")
     print(f"""  v0 = [ {dem_state.mu_v0_tilde[0].item():.3f}, {dem_state.mu_v0_tilde[1].item():.3f} ]""")
     dem_step_d(dem_state, lr=lr_dynamic)
+    f_bar = free_action_from_state(dem_state)
+    print(f"  (D). {f_bar.item()}")
+    dem_step_m(dem_state, lr_lambda=lr_lambda, iter_lambda=iter_lambda)
+    dem_step_ex0(dem_state, lr_theta=lr_theta)
+    dem_step_precision(dem_state)
+
     mu_xs, mu_vs, idx_first, idx_last = extract_dynamic(dem_state)
     mu_xss.append(mu_xs)
     mu_vss.append(mu_vs)
-    f_bar = free_action_from_state(dem_state)
-    print(f"  (D). {f_bar.item()}")
-    dem_step_m(dem_state, lr_lambda=lr_lambda0, iter_lambda=iter_lambda)
-    dem_step_ex0(dem_state, lr_theta=lr_theta0)
-    dem_step_precision(dem_state)
+    f_bars.append(f_bar.clone().detach())
+    mu_thetas.append(dem_state.mu_theta.clone().detach())
+    sig_thetas.append(dem_state.sig_theta.clone().detach())
+    lr_thetas.append(lr_theta)
