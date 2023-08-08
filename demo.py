@@ -362,8 +362,9 @@ class DEMState:
     input: DEMInput
 
     # dynamic state estimates
-    mu_x_tildes: Iterable[torch.Tensor]
-    mu_v_tildes: Iterable[torch.Tensor]
+    # FIXME: Should these just be a tensor?
+    mu_x_tildes: list[torch.Tensor]
+    mu_v_tildes: list[torch.Tensor]
     sig_x_tilde: torch.Tensor
     sig_v_tilde: torch.Tensor
 
@@ -377,6 +378,7 @@ class DEMState:
     mu_x0_tilde: torch.Tensor
     mu_v0_tilde: torch.Tensor
 
+    # FIXME: Remove tthese functions, and just rely on the lists (tensors?) directly.
     def iter_mu_x_tildes(self):
         yield from self.mu_x_tildes
 
@@ -453,8 +455,8 @@ x0 = np.array([0, 1])
 A = np.array([[0, 1], [-1, 0]])
 
 # noise standard deviations
-w_sd = 0.01 # noise on states
-z_sd = 0.2 # noise on outputs
+w_sd = 0.0 # noise on states
+z_sd = 0.0 # noise on outputs
 noise_temporal_sig = 0.15 # temporal smoothing kernel parameter
 
 # Simulate the data
@@ -743,6 +745,71 @@ def dem_step_e(state: DEMState, lr_theta):
     state.mu_theta = state.mu_theta + step_matrix @ theta_d
 
 
+def dem_step_ex0(state: DEMState, lr_theta):
+    """
+    Performs the parameter update (step E) of DEM together with an update of v0
+    and x0 (not in the original algorithm).
+    """
+    # TODO: should be an if statement comparing new f_bar with old
+    def param_free_action(mu_theta, mu_x0_tilde, mu_v0_tilde):
+        mu_x_tildes = list(state.iter_mu_x_tildes())
+        mu_v_tildes = list(state.iter_mu_v_tildes())
+        mu_x_tildes[0] = mu_x0_tilde
+        mu_v_tildes[0] = mu_v0_tilde
+        # free action as a function of theta
+        return free_action(
+            m_x=state.input.m_x,
+            m_v=state.input.m_v,
+            p=state.input.p,
+            mu_x_tildes=mu_x_tildes,
+            mu_v_tildes=mu_v_tildes,
+            sig_x_tilde=state.sig_x_tilde,
+            sig_v_tilde=state.sig_v_tilde,
+            y_tildes=state.input.iter_y_tildes(),
+            eta_v_tildes=state.input.iter_eta_v_tildes(),
+            p_v_tildes=state.input.iter_p_v_tildes(),
+            eta_theta=state.input.eta_theta,
+            eta_lambda=state.input.eta_lambda,
+            p_theta=state.input.p_theta,
+            p_lambda=state.input.p_lambda,
+            mu_theta=mu_theta,
+            mu_lambda=state.mu_lambda,
+            sig_theta=state.sig_theta,
+            sig_lambda=state.sig_lambda,
+            g=state.input.g,
+            f=state.input.f,
+            omega_w=state.input.omega_w,
+            omega_z=state.input.omega_z,
+            noise_autocorr_inv=state.input.noise_autocorr_inv)
+    clear_gradients_on_state(state)
+    mu_x0_tilde = state.mu_x0_tilde.clone().detach().requires_grad_()
+    mu_v0_tilde = state.mu_v0_tilde.clone().detach().requires_grad_()
+    state.mu_x_tildes[0] = mu_x0_tilde
+    state.mu_v_tildes[0] = mu_v0_tilde
+    f_bar = free_action_from_state(state)
+
+    theta_d = lr_theta * torch.autograd.grad(f_bar, state.mu_theta, retain_graph=True)[0]
+    out = torch.autograd.functional.hessian(param_free_action, (state.mu_theta, mu_x0_tilde, mu_v0_tilde))
+    theta_dd = lr_theta * out[0][0]
+    x0_tilde_dd = lr_theta * out[1][1]
+    v0_tilde_dd = lr_theta * out[2][2]
+    step_matrix_theta = (torch.matrix_exp(theta_dd) - torch.eye(theta_dd.shape[0])) @ torch.linalg.inv(theta_dd)
+
+    x0_tilde_dd = _fix_grad_shape(x0_tilde_dd)
+    x0_tilde_d = lr_theta * torch.autograd.grad(f_bar, mu_x0_tilde, retain_graph=True)[0]
+    x0_tilde_d = _fix_grad_shape(x0_tilde_d)
+    step_matrix_x0_tilde = (torch.matrix_exp(x0_tilde_dd) - torch.eye(x0_tilde_dd.shape[0])) @ torch.linalg.inv(x0_tilde_dd)
+
+    v0_tilde_dd = _fix_grad_shape(v0_tilde_dd)
+    v0_tilde_d = lr_theta * torch.autograd.grad(f_bar, mu_v0_tilde)[0]
+    v0_tilde_d = _fix_grad_shape(v0_tilde_d)
+    step_matrix_v0_tilde = (torch.matrix_exp(v0_tilde_dd) - torch.eye(v0_tilde_dd.shape[0])) @ torch.linalg.inv(v0_tilde_dd)
+
+    state.mu_theta = state.mu_theta + step_matrix_theta @ theta_d
+    state.mu_x0_tilde = state.mu_x0_tilde + step_matrix_x0_tilde @ x0_tilde_d
+    state.mu_v0_tilde = state.mu_v0_tilde + step_matrix_v0_tilde @ v0_tilde_d
+
+
 def dem_step_precision(state: DEMState):
     """
     Does a precision update of DEM.
@@ -815,14 +882,14 @@ def extract_dynamic(state: DEMState):
 
 dem_state = test_state()
 
+mu_xss = []
+mu_vss = []
+
 lr_dynamic = 1
 lr_theta0 = 0.5
 lr_lambda0 = 0.01
 iter_lambda = 20
-iter_dem = 50
-
-mu_xss = []
-mu_vss = []
+iter_dem = 100
 
 # DEM procedure
 for i in range(iter_dem):
@@ -831,6 +898,8 @@ for i in range(iter_dem):
     print(f"""  theta = [ {dem_state.mu_theta[0]:.3f}, {dem_state.mu_theta[1]:.3f},
           {dem_state.mu_theta[2]:.3f}, {dem_state.mu_theta[3]:.3f} ]""")
     print(f"""  mu_lambda_z = {dem_state.mu_lambda[0]:.3f}, mu_lambda_w = {dem_state.mu_lambda[1]:.3f}""")
+    print(f"""  x0 = [ {dem_state.mu_x0_tilde[0].item():.3f}, {dem_state.mu_x0_tilde[1].item():.3f} ]""")
+    print(f"""  v0 = [ {dem_state.mu_v0_tilde[0].item():.3f}, {dem_state.mu_v0_tilde[1].item():.3f} ]""")
     dem_step_d(dem_state, lr=lr_dynamic)
     mu_xs, mu_vs, idx_first, idx_last = extract_dynamic(dem_state)
     mu_xss.append(mu_xs)
@@ -838,5 +907,5 @@ for i in range(iter_dem):
     f_bar = free_action_from_state(dem_state)
     print(f"  (D). {f_bar.item()}")
     dem_step_m(dem_state, lr_lambda=lr_lambda0, iter_lambda=iter_lambda)
-    dem_step_e(dem_state, lr_theta=lr_theta0)
+    dem_step_ex0(dem_state, lr_theta=lr_theta0)
     dem_step_precision(dem_state)
