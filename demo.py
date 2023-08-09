@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from copy import copy
 from typing import Callable, Iterable
 from itertools import repeat
@@ -111,6 +111,7 @@ def internal_energy_static(
     u_c_lambda = _int_eng_par_static(mu_lambda, eta_lambda, p_lambda)
     u_c = u_c_theta + u_c_lambda
 
+    # FIXME OPT: Don't run torch.autograd.functional.hessian twice.
     if compute_dds:
         u_c_theta_dd = torch.autograd.functional.hessian(lambda mu: _int_eng_par_static(mu, eta_theta, p_theta), mu_theta, create_graph=True)
         u_c_lambda_dd = torch.autograd.functional.hessian(lambda mu: _int_eng_par_static(mu, eta_lambda, p_lambda), mu_lambda, create_graph=True)
@@ -150,6 +151,11 @@ def internal_energy_dynamic(
     u_t = _int_eng_dynamic(mu_x_tilde, mu_v_tilde, mu_theta, mu_lambda)
     # horribly inefficient way to go about this, but hey, at least it may work...
     # (so many unnecessary repeated computations)
+
+    # FIXME OPT: Optimize the code below. Don't run
+    # torch.autograd.functional.hessian four times separately? Running it once
+    # should allow for all the necessary outputs. But it might unnecessarily
+    # compute Hessians _between_ the parameters, which might be slower?
     if compute_dds:
         u_t_x_tilde_dd = torch.autograd.functional.hessian(lambda mu: _int_eng_dynamic(mu, mu_v_tilde, mu_theta, mu_lambda), mu_x_tilde, create_graph=True)
         u_t_v_tilde_dd = torch.autograd.functional.hessian(lambda mu: _int_eng_dynamic(mu_x_tilde, mu, mu_theta, mu_lambda), mu_v_tilde, create_graph=True)
@@ -611,6 +617,10 @@ def dem_step_d(state: DEMState, lr):
                             strict=True)):
         def dynamic_free_energy(mu_x_tilde_t, mu_v_tilde_t):
             # free action as a function of dynamic terms
+            # NOTE: We can't just use free_action_from_state(replace(state, ...))
+            # because we cannot easily override y_tildes, which comes
+            # dynamically generated from state.input.iter_y_tildes()
+            # Maybe we could precompute it?
             return free_action(
                 m_x=state.input.m_x,
                 m_v=state.input.m_v,
@@ -669,30 +679,7 @@ def dem_step_m(state: DEMState, lr_lambda, iter_lambda, min_improv=0.01):
     for i in range(iter_lambda):
         def lambda_free_action(mu_lambda):
             # free action as a function of lambda
-            return free_action(
-                m_x=state.input.m_x,
-                m_v=state.input.m_v,
-                p=state.input.p,
-                mu_x_tildes=state.mu_x_tildes,
-                mu_v_tildes=state.mu_v_tildes,
-                sig_x_tildes=state.sig_x_tildes,
-                sig_v_tildes=state.sig_v_tildes,
-                y_tildes=state.input.iter_y_tildes(),
-                eta_v_tildes=state.input.iter_eta_v_tildes(),
-                p_v_tildes=state.input.iter_p_v_tildes(),
-                eta_theta=state.input.eta_theta,
-                eta_lambda=state.input.eta_lambda,
-                p_theta=state.input.p_theta,
-                p_lambda=state.input.p_lambda,
-                mu_theta=state.mu_theta,
-                mu_lambda=mu_lambda,
-                sig_theta=state.sig_theta,
-                sig_lambda=state.sig_lambda,
-                g=state.input.g,
-                f=state.input.f,
-                omega_w=state.input.omega_w,
-                omega_z=state.input.omega_z,
-                noise_autocorr_inv=state.input.noise_autocorr_inv)
+            return free_action_from_state(replace(state, mu_lambda=mu_lambda))
         clear_gradients_on_state(state)
         f_bar = free_action_from_state(state)
         print(f"  (M) {i}. f_bar={f_bar.item():.4f}, lambda={state.mu_lambda}")
@@ -715,30 +702,7 @@ def dem_step_e(state: DEMState, lr_theta):
     # TODO: should be an if statement comparing new f_bar with old
     def theta_free_action(mu_theta):
         # free action as a function of theta
-        return free_action(
-            m_x=state.input.m_x,
-            m_v=state.input.m_v,
-            p=state.input.p,
-            mu_x_tildes=state.mu_x_tildes,
-            mu_v_tildes=state.mu_v_tildes,
-            sig_x_tildes=state.sig_x_tilde,
-            sig_v_tildes=state.sig_v_tilde,
-            y_tildes=state.input.iter_y_tildes(),
-            eta_v_tildes=state.input.iter_eta_v_tildes(),
-            p_v_tildes=state.input.iter_p_v_tildes(),
-            eta_theta=state.input.eta_theta,
-            eta_lambda=state.input.eta_lambda,
-            p_theta=state.input.p_theta,
-            p_lambda=state.input.p_lambda,
-            mu_theta=mu_theta,
-            mu_lambda=state.mu_lambda,
-            sig_theta=state.sig_theta,
-            sig_lambda=state.sig_lambda,
-            g=state.input.g,
-            f=state.input.f,
-            omega_w=state.input.omega_w,
-            omega_z=state.input.omega_z,
-            noise_autocorr_inv=state.input.noise_autocorr_inv)
+        return free_action_from_state(replace(state, mu_theta=mu_theta))
     clear_gradients_on_state(state)
     f_bar = free_action_from_state(state)
     theta_d = lr_theta * torch.autograd.grad(f_bar, state.mu_theta)[0]
@@ -758,31 +722,11 @@ def dem_step_ex0(state: DEMState, lr_theta):
         mu_v_tildes = copy(state.mu_v_tildes)
         mu_x_tildes[0] = mu_x0_tilde
         mu_v_tildes[0] = mu_v0_tilde
-        # free action as a function of theta
-        return free_action(
-            m_x=state.input.m_x,
-            m_v=state.input.m_v,
-            p=state.input.p,
-            mu_x_tildes=mu_x_tildes,
-            mu_v_tildes=mu_v_tildes,
-            sig_x_tildes=state.sig_x_tildes,
-            sig_v_tildes=state.sig_v_tildes,
-            y_tildes=state.input.iter_y_tildes(),
-            eta_v_tildes=state.input.iter_eta_v_tildes(),
-            p_v_tildes=state.input.iter_p_v_tildes(),
-            eta_theta=state.input.eta_theta,
-            eta_lambda=state.input.eta_lambda,
-            p_theta=state.input.p_theta,
-            p_lambda=state.input.p_lambda,
-            mu_theta=mu_theta,
-            mu_lambda=state.mu_lambda,
-            sig_theta=state.sig_theta,
-            sig_lambda=state.sig_lambda,
-            g=state.input.g,
-            f=state.input.f,
-            omega_w=state.input.omega_w,
-            omega_z=state.input.omega_z,
-            noise_autocorr_inv=state.input.noise_autocorr_inv)
+        # free action as a function of theta and initial state
+        return free_action_from_state(replace(state,
+                                              mu_theta=mu_theta,
+                                              mu_x_tildes=mu_x_tildes,
+                                              mu_v_tildes=mu_v_tildes))
     clear_gradients_on_state(state)
     mu_x0_tilde = state.mu_x0_tilde.clone().detach().requires_grad_()
     mu_v0_tilde = state.mu_v0_tilde.clone().detach().requires_grad_()
