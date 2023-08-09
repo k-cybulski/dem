@@ -5,6 +5,15 @@ little optimization. Also, it is not very parallelized, since it relies on
 iteration over time as opposed to batch operations on the entire sequence of
 generalized inputs.
 """
+from dataclasses import dataclass, field, replace
+from copy import copy
+from typing import Callable, Iterable
+from itertools import repeat
+
+import torch
+
+from ..core import deriv_mat, iterate_generalized
+from ..noise import generate_noise_conv, autocorr_friston, noise_cov_gen_theoretical
 
 # Part 1: Implementation of optimization targets
 
