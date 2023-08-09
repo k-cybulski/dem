@@ -1,19 +1,12 @@
-from dataclasses import dataclass, field, replace
-from copy import copy
-from typing import Callable, Iterable
-from itertools import repeat
+"""
+This module contains a naive implementation of DEM. It *just* computes free
+action and performs updates by doing automatic differentiation on it, with
+little optimization. Also, it is not very parallelized, since it relies on
+iteration over time as opposed to batch operations on the entire sequence of
+generalized inputs.
+"""
 
-import torch
-import numpy as np
-from scipy.integrate import solve_ivp
-from matplotlib import pyplot as plt
-
-from hdm.core import deriv_mat, iterate_generalized
-from hdm.noise import generate_noise_conv, autocorr_friston, noise_cov_gen_theoretical
-
-plot = False
-
-# Part 0: Implement DEM
+# Part 1: Implementation of optimization targets
 
 def kron(A, B):
     """
@@ -298,6 +291,8 @@ def free_action(
     f_bar = f_c + f_tsum
     return f_bar
 
+# Part 2: Implementation of DEM
+
 @dataclass
 class DEMInput:
     """
@@ -441,158 +436,11 @@ def internal_action_from_state(state: DEMState):
             omega_z=state.input.omega_z,
             noise_autocorr_inv=state.input.noise_autocorr_inv)
 
-# Part 1: Simulate some data
-# generate data with a simple model that we can invert with DEM
-
-## Define the model
-# x' = f(x, v) + w
-# y  = g(x, v) + z
-
-## Simple case
-# x' = Ax + v + w
-# y  = Ix + z
-
-x0 = np.array([0, 1])
-A = np.array([[0, 1], [-1, 0]])
-
-# noise standard deviations
-w_sd = 0.0 # noise on states
-z_sd = 0.0 # noise on outputs
-noise_temporal_sig = 0.15 # temporal smoothing kernel parameter
-
-# Simulate the data
-# NOTE: Data are in shape (number of samples, number of features)
-t_start = 0
-t_end = 2
-t_span = (t_start, t_end)
-dt = 0.1
-ts = np.arange(start=t_start, stop=t_end, step=dt)
-n = int((t_end - t_start) / dt)
-
-# how many terms x and v contain
-m_x = 2
-m_v = 2
-
-# Noises
-# NOTE: correlations between noise terms are 0 with this construction
-seed = 546
-rng = np.random.default_rng(seed)
-ws = np.vstack([
-        generate_noise_conv(n, dt, w_sd ** 2, noise_temporal_sig, rng=rng)
-        for _ in range(m_x)
-    ]).T
-zs = np.vstack([
-        generate_noise_conv(n, dt, z_sd ** 2, noise_temporal_sig, rng=rng)
-        for _ in range(m_x)
-    ]).T
-
-# Running the system with noise
-def f(t, x):
-    # need to interpolate noise at this t separately for each feature
-    noises = []
-    for col in range(ws.shape[1]):
-        noise_col = np.interp(t, ts, ws[:,col])
-        noises.append(noise_col)
-    return A @ x + np.array(noises)
-
-out = solve_ivp(f, t_span, x0, t_eval=ts)
-
-# System
-xs = torch.tensor(out.y.T, dtype=torch.float32)
-ys = torch.tensor(xs + zs, dtype=torch.float32)
-
-vs = torch.zeros((ys.shape[0], 2), dtype=torch.float32)
-v_temporal_sig = 1
-
-if plot:
-    plt.plot(ts, xs[:, 0], label="x0", linestyle="-", color="red")
-    plt.plot(ts, ys[:, 0], label="y0", linestyle="--", color="red")
-    plt.plot(ts, xs[:, 1], label="x1", linestyle="-", color="purple")
-    plt.plot(ts, ys[:, 1], label="y1", linestyle="--", color="purple")
-    plt.legend()
-    plt.show()
-
-def dem_f(x, v, params):
-    params = params.reshape((2,2))
-    return params @ x + v
-
-def dem_g(x, v, params):
-    return x
-
-# Part 2: Define a DEM model
-p = 3
-p_comp = 6
-
-
-v_autocorr = torch.tensor(noise_cov_gen_theoretical(p, sig=v_temporal_sig, autocorr=autocorr_friston()), dtype=torch.float32)
-v_autocorr_inv_ = torch.linalg.inv(v_autocorr)
-
-noise_autocorr = torch.tensor(noise_cov_gen_theoretical(p, sig=noise_temporal_sig, autocorr=autocorr_friston()), dtype=torch.float32)
-noise_autocorr_inv_ = torch.linalg.inv(noise_autocorr)
-
-omega_w = torch.eye(2)
-omega_z = torch.eye(2)
-
-dem_input = DEMInput(
-    dt=dt,
-    m_x=2,
-    m_v=2, ### <- will always be 0 anyway, just putting it in here to make it simple
-    p=p,
-    p_comp=p_comp,
-    ys=ys,
-    eta_v=vs,
-    p_v=torch.eye(2),
-    v_autocorr_inv=v_autocorr_inv_,
-    eta_theta=torch.tensor([0, 0, 0, 0], dtype=torch.float32),
-    eta_lambda=torch.tensor([0, 0], dtype=torch.float32),
-    p_theta=torch.eye(4, dtype=torch.float32),
-    p_lambda=torch.eye(2, dtype=torch.float32),
-    g=dem_g,
-    f=dem_f,
-    omega_w=torch.eye(2, dtype=torch.float32),
-    omega_z=torch.eye(2, dtype=torch.float32),
-    noise_autocorr_inv=noise_autocorr_inv_,
-        )
-
-# ideal parameters and states
-ideal_mu_x_tildes = list(iterate_generalized(xs, dt, p, p_comp=p_comp))
-ideal_mu_v_tildes = list(repeat(torch.zeros((2 * (p + 1), 1), dtype=torch.float32), len(ideal_mu_x_tildes)))
-ideal_sig_x_tildes = list(repeat(torch.eye(m_x * (p + 1)), len(ideal_mu_x_tildes))) # uhh this probably isn't the ideal
-ideal_sig_v_tildes = list(repeat(torch.eye(m_v * (p + 1)), len(ideal_mu_x_tildes))) # uhh this probably isn't the ideal
-
-if plot:
-    l = np.hstack(ideal_mu_x_tildes).T
-    plt.plot(l[:, 0::2])
-    plt.show()
-
-ideal_mu_x0_tilde = ideal_mu_x_tildes[0].clone()
-ideal_mu_v0_tilde = ideal_mu_v_tildes[0].clone()
-
-ideal_mu_theta = torch.tensor(A.reshape(-1), dtype=torch.float32)#, requires_grad=True)
-ideal_sig_theta = torch.eye(4) * 0.01
-
-ideal_mu_lambda = torch.tensor(np.ones(2)* np.log(0.1), dtype=torch.float32, requires_grad=True)  # idk
-ideal_sig_lambda = torch.eye(2) * 0.01
-
-# a well-fitted model with hopefully low free action
-dem_state = DEMState(
-        input=dem_input,
-        mu_x_tildes=ideal_mu_x_tildes,
-        mu_v_tildes=ideal_mu_v_tildes,
-        sig_x_tildes=ideal_sig_x_tildes,
-        sig_v_tildes=ideal_sig_v_tildes,
-        mu_theta=ideal_mu_theta,
-        mu_lambda=ideal_mu_lambda,
-        sig_theta=ideal_sig_theta,
-        sig_lambda=ideal_sig_lambda,
-        mu_x0_tilde=ideal_mu_x0_tilde,
-        mu_v0_tilde=ideal_mu_v0_tilde)
-
 def clear_gradients_on_state(state: DEMState):
     state.mu_theta = state.mu_theta.detach().clone().requires_grad_()
     state.mu_lambda = state.mu_lambda.detach().clone().requires_grad_()
 
-# Sanity checks!
+
 def dem_step_d(state: DEMState, lr):
     """
     Performs the D step of DEM.
@@ -664,11 +512,11 @@ def dem_step_d(state: DEMState, lr):
     state.mu_x_tildes = mu_x_tildes
     state.mu_v_tildes = mu_v_tildes
 
-
 def dem_step_m(state: DEMState, lr_lambda, iter_lambda, min_improv):
     """
     Performs the noise hyperparameter update (step M) of DEM.
     """
+    # FIXME: Do 'until convergence' rather than 'for some fixed number of steps'
     last_f_bar = None
     for i in range(iter_lambda):
         def lambda_free_action(mu_lambda):
@@ -762,120 +610,11 @@ def dem_step_precision(state: DEMState):
     state.sig_v_tildes = [-torch.linalg.inv(u_t_v_tilde_dd) for u_t_v_tilde_dd in u_t_v_tilde_dds]
 
 
-def dem_step(state: DEMState, lr_dynamic, lr_theta, lr_lambda, iter_lambda):
+def dem_step(state: DEMState, lr_dynamic, lr_theta, lr_lambda, iter_lambda, m_min_improv=0.01):
     """
     Does an iteration of DEM.
     """
     dem_step_d(state, lr_dynamic)
-    dem_step_m(state, lr_lambda, iter_lambda)
+    dem_step_m(state, lr_lambda, iter_lambda, min_improv=m_min_improv)
     dem_step_e(state, lr_theta)
     dem_step_precision()
-
-# # And some checks for sanity
-# lr = 0.1
-# for i in range(100):
-#     dem_state.mu_lambda.grad = None
-#     u, u_theta_dd, u_lambda_dd, u_t_x_tilde_dds, u_t_v_tilde_dds = internal_action_from_state(dem_state)
-#     print(f'{i}. {u}, {dem_state.mu_lambda}')
-#     grad = torch.autograd.grad(u, dem_state.mu_lambda)[0]
-#     dem_state.mu_lambda = (dem_state.mu_lambda + lr * grad)
-#     dem_state.mu_lambda.grad = None
-
-# print("Test step for crash...")
-# dem_static_step(dem_state, lr_theta=lr_theta, lr_lambda=lr_lambda, iter_lambda=1)
-
-# Starting parameters/hyperparameters, to see how well we can find the true ones
-mu_lambda0 = torch.tensor([0, 0], dtype=torch.float32)
-sig_lambda0 = torch.eye(2) * 0.01
-
-mu_theta0 = torch.tensor([0,0,0,0], dtype=torch.float32)
-sig_theta0 = torch.eye(4) * 0.01
-
-sig_x_tilde0 = torch.eye(m_x * (p + 1))
-sig_v_tilde0 = torch.eye(m_v * (p + 1))
-
-def test_state():
-    dem_state = DEMState(
-            input=dem_input,
-            mu_x_tildes=[mu_x_tilde.clone().detach() for mu_x_tilde in ideal_mu_x_tildes],
-            mu_v_tildes=[mu_v_tilde.clone().detach() for mu_v_tilde in ideal_mu_v_tildes],
-            sig_x_tildes=[sig_x_tilde0.clone().detach() for _ in ideal_mu_x_tildes],
-            sig_v_tildes=[sig_v_tilde0.clone().detach() for _ in ideal_mu_v_tildes],
-            mu_theta=mu_theta0.clone().detach(),
-            mu_lambda=mu_lambda0.clone().detach(),
-            sig_theta=sig_theta0.clone().detach(),
-            sig_lambda=sig_lambda0.clone().detach(),
-            mu_x0_tilde=ideal_mu_x0_tilde.clone().detach(),
-            mu_v0_tilde=ideal_mu_v0_tilde.clone().detach())
-    return dem_state
-
-def clean_state():
-    """
-    A DEMState initialized with xs and vs at zero.
-    """
-    dem_state = DEMState(
-            input=dem_input,
-            mu_x_tildes=[torch.zeros_like(mu_x_tilde) for mu_x_tilde in ideal_mu_x_tildes],
-            mu_v_tildes=[torch.zeros_like(mu_v_tilde) for mu_v_tilde in ideal_mu_v_tildes],
-            sig_x_tildes=[sig_x_tilde0.clone().detach() for _ in ideal_mu_x_tildes],
-            sig_v_tildes=[sig_v_tilde0.clone().detach() for _ in ideal_mu_v_tildes],
-            mu_theta=mu_theta0.clone().detach(),
-            mu_lambda=mu_lambda0.clone().detach(),
-            sig_theta=sig_theta0.clone().detach(),
-            sig_lambda=sig_lambda0.clone().detach(),
-            mu_x0_tilde=torch.zeros_like(ideal_mu_x0_tilde),
-            mu_v0_tilde=torch.zeros_like(ideal_mu_v0_tilde))
-    return dem_state
-
-# Do a single step to find optimal sigmas
-# dem_static_step(dem_state, lr_theta=0.01, lr_lambda0=0.01, iter_lambda=1)
-
-def extract_dynamic(state: DEMState):
-    mu_xs = torch.stack([mu_x_tilde[:state.input.m_x] for mu_x_tilde in state.mu_x_tildes], axis=0)[:,:,0]
-    mu_vs = torch.stack([mu_v_tilde[:state.input.m_v] for mu_v_tilde in state.mu_v_tildes], axis=0)[:,:,0]
-    idx_first = int(state.input.p_comp // 2)
-    idx_last = idx_first + len(state.mu_x_tildes)
-    return mu_xs, mu_vs, idx_first, idx_last
-
-dem_state = clean_state()
-
-mu_xss = []
-mu_vss = []
-mu_thetas = []
-sig_thetas = []
-lr_thetas = []
-f_bars = []
-
-lr_dynamic = 1
-lr_theta0 =  5
-lr_theta_rate_coeff = 20 # after how many steps does it get to half of lr_theta0
-lr_lambda = 0.01
-iter_lambda = 20
-iter_dem = 200
-m_min_improv = 0.01
-
-# DEM procedure
-for i in range(iter_dem):
-    # heuristic for decreasing learning rate
-    lr_theta = lr_theta_rate_coeff * lr_theta0 / (i + lr_theta_rate_coeff)
-    f_bar = free_action_from_state(dem_state)
-    print(f"{i}. {f_bar.item()}")
-    print(f"""  theta = [ {dem_state.mu_theta[0]:.3f}, {dem_state.mu_theta[1]:.3f},
-          {dem_state.mu_theta[2]:.3f}, {dem_state.mu_theta[3]:.3f} ]""")
-    print(f"""  mu_lambda_z = {dem_state.mu_lambda[0]:.3f}, mu_lambda_w = {dem_state.mu_lambda[1]:.3f}""")
-    print(f"""  x0 = [ {dem_state.mu_x0_tilde[0].item():.3f}, {dem_state.mu_x0_tilde[1].item():.3f} ]""")
-    print(f"""  v0 = [ {dem_state.mu_v0_tilde[0].item():.3f}, {dem_state.mu_v0_tilde[1].item():.3f} ]""")
-    dem_step_d(dem_state, lr=lr_dynamic)
-    f_bar = free_action_from_state(dem_state)
-    print(f"  (D). {f_bar.item()}")
-    dem_step_m(dem_state, lr_lambda=lr_lambda, iter_lambda=iter_lambda, min_improv=m_min_improv)
-    dem_step_ex0(dem_state, lr_theta=lr_theta)
-    dem_step_precision(dem_state)
-
-    mu_xs, mu_vs, idx_first, idx_last = extract_dynamic(dem_state)
-    mu_xss.append(mu_xs)
-    mu_vss.append(mu_vs)
-    f_bars.append(f_bar.clone().detach())
-    mu_thetas.append(dem_state.mu_theta.clone().detach())
-    sig_thetas.append(dem_state.sig_theta.clone().detach())
-    lr_thetas.append(lr_theta)
