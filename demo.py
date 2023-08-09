@@ -442,162 +442,12 @@ def internal_action_from_state(state: DEMState):
             omega_z=state.input.omega_z,
             noise_autocorr_inv=state.input.noise_autocorr_inv)
 
-# Part 1: Simulate some data
-# generate data with a simple model that we can invert with DEM
 
-## Define the model
-# x' = f(x, v) + w
-# y  = g(x, v) + z
-
-## Simple case
-# x' = Ax + w
-# y  = Ix + z
-
-x0 = np.array([0, 1])
-A = np.array([[0, 1], [-1, 0]])
-
-# noise standard deviations
-w_sd = 0.01 # noise on states
-z_sd = 0.05 # noise on outputs
-noise_temporal_sig = 0.15 # temporal smoothing kernel parameter
-
-# Simulate the data
-# NOTE: Data are in shape (number of samples, number of features)
-t_start = 0
-t_end = 2
-t_span = (t_start, t_end)
-dt = 0.1
-ts = np.arange(start=t_start, stop=t_end, step=dt)
-n = int((t_end - t_start) / dt)
-
-# how many terms x and v contain
-m_x = 2
-m_v = 2
-
-# Noises
-# NOTE: correlations between noise terms are 0 with this construction
-seed = 546
-rng = np.random.default_rng(seed)
-ws = np.vstack([
-        generate_noise_conv(n, dt, w_sd ** 2, noise_temporal_sig, rng=rng)
-        for _ in range(m_x)
-    ]).T
-zs = np.vstack([
-        generate_noise_conv(n, dt, z_sd ** 2, noise_temporal_sig, rng=rng)
-        for _ in range(m_x)
-    ]).T
-
-# Running the system with noise
-def f(t, x):
-    # need to interpolate noise at this t separately for each feature
-    noises = []
-    for col in range(ws.shape[1]):
-        noise_col = np.interp(t, ts, ws[:,col])
-        noises.append(noise_col)
-    return A @ x + np.array(noises)
-
-out = solve_ivp(f, t_span, x0, t_eval=ts)
-
-# System
-xs = torch.tensor(out.y.T, dtype=torch.float32)
-ys = torch.tensor(xs + zs, dtype=torch.float32)
-
-vs = torch.zeros((ys.shape[0], 2), dtype=torch.float32)
-v_temporal_sig = 1
-
-if plot:
-    plt.plot(ts, xs[:, 0], label="x0", linestyle="-", color="red")
-    plt.plot(ts, ys[:, 0], label="y0", linestyle="--", color="red")
-    plt.plot(ts, xs[:, 1], label="x1", linestyle="-", color="purple")
-    plt.plot(ts, ys[:, 1], label="y1", linestyle="--", color="purple")
-    plt.legend()
-    plt.show()
-
-# The model is
-# x' = Ax + w
-# y  = Ix + z
-
-def dem_f(x, v, params):
-    params = params.reshape((2,2))
-    return params @ x
-
-def dem_g(x, v, params):
-    return x
-
-# Part 2: Define a DEM model
-p = 3
-p_comp = 6
-
-
-v_autocorr = torch.tensor(noise_cov_gen_theoretical(p, sig=v_temporal_sig, autocorr=autocorr_friston()), dtype=torch.float32)
-v_autocorr_inv_ = torch.linalg.inv(v_autocorr)
-
-noise_autocorr = torch.tensor(noise_cov_gen_theoretical(p, sig=noise_temporal_sig, autocorr=autocorr_friston()), dtype=torch.float32)
-noise_autocorr_inv_ = torch.linalg.inv(noise_autocorr)
-
-omega_w = torch.eye(2)
-omega_z = torch.eye(2)
-
-dem_input = DEMInput(
-    dt=dt,
-    m_x=2,
-    m_v=2, ### <- will always be 0 anyway, just putting it in here to make it simple
-    p=p,
-    p_comp=p_comp,
-    ys=ys,
-    eta_v=vs,
-    p_v=torch.eye(2),
-    v_autocorr_inv=v_autocorr_inv_,
-    eta_theta=torch.tensor([0, 0, 0, 0], dtype=torch.float32),
-    eta_lambda=torch.tensor([0, 0], dtype=torch.float32),
-    p_theta=torch.eye(4, dtype=torch.float32),
-    p_lambda=torch.eye(2, dtype=torch.float32),
-    g=dem_g,
-    f=dem_f,
-    omega_w=torch.eye(2, dtype=torch.float32),
-    omega_z=torch.eye(2, dtype=torch.float32),
-    noise_autocorr_inv=noise_autocorr_inv_,
-        )
-
-# ideal parameters and states
-ideal_mu_x_tildes = list(iterate_generalized(xs, dt, p, p_comp=p_comp))
-ideal_mu_v_tildes = list(repeat(torch.zeros((2 * (p + 1), 1), dtype=torch.float32), len(ideal_mu_x_tildes)))
-ideal_sig_x_tildes = list(repeat(torch.eye(m_x * (p + 1)), len(ideal_mu_x_tildes))) # uhh this probably isn't the ideal
-ideal_sig_v_tildes = list(repeat(torch.eye(m_v * (p + 1)), len(ideal_mu_x_tildes))) # uhh this probably isn't the ideal
-
-if plot:
-    l = np.hstack(ideal_mu_x_tildes).T
-    plt.plot(l[:, 0::2])
-    plt.show()
-
-ideal_mu_x0_tilde = ideal_mu_x_tildes[0].clone()
-ideal_mu_v0_tilde = ideal_mu_v_tildes[0].clone()
-
-ideal_mu_theta = torch.tensor(A.reshape(-1), dtype=torch.float32)#, requires_grad=True)
-ideal_sig_theta = torch.eye(4) * 0.01
-
-ideal_mu_lambda = torch.tensor(np.ones(2)* np.log(0.1), dtype=torch.float32, requires_grad=True)  # idk
-ideal_sig_lambda = torch.eye(2) * 0.01
-
-# a well-fitted model with hopefully low free action
-dem_state = DEMState(
-        input=dem_input,
-        mu_x_tildes=ideal_mu_x_tildes,
-        mu_v_tildes=ideal_mu_v_tildes,
-        sig_x_tildes=ideal_sig_x_tildes,
-        sig_v_tildes=ideal_sig_v_tildes,
-        mu_theta=ideal_mu_theta,
-        mu_lambda=ideal_mu_lambda,
-        sig_theta=ideal_sig_theta,
-        sig_lambda=ideal_sig_lambda,
-        mu_x0_tilde=ideal_mu_x0_tilde,
-        mu_v0_tilde=ideal_mu_v0_tilde)
-
+# Functions for performing DEM optimization
 def clear_gradients_on_state(state: DEMState):
     state.mu_theta = state.mu_theta.detach().clone().requires_grad_()
     state.mu_lambda = state.mu_lambda.detach().clone().requires_grad_()
 
-# Sanity checks!
 def dem_step_d(state: DEMState, lr):
     """
     Performs the D step of DEM.
@@ -776,18 +626,143 @@ def dem_step(state: DEMState, lr_dynamic, lr_theta, lr_lambda, iter_lambda):
     dem_step_e(state, lr_theta)
     dem_step_precision()
 
-# # And some checks for sanity
-# lr = 0.1
-# for i in range(100):
-#     dem_state.mu_lambda.grad = None
-#     u, u_theta_dd, u_lambda_dd, u_t_x_tilde_dds, u_t_v_tilde_dds = internal_action_from_state(dem_state)
-#     print(f'{i}. {u}, {dem_state.mu_lambda}')
-#     grad = torch.autograd.grad(u, dem_state.mu_lambda)[0]
-#     dem_state.mu_lambda = (dem_state.mu_lambda + lr * grad)
-#     dem_state.mu_lambda.grad = None
+# Part 1: Simulate some data
+# generate data with a simple model that we can invert with DEM
 
-# print("Test step for crash...")
-# dem_static_step(dem_state, lr_theta=lr_theta, lr_lambda=lr_lambda, iter_lambda=1)
+## Define the model
+# x' = f(x, v) + w
+# y  = g(x, v) + z
+
+## Simple case
+# x' = Ax + w
+# y  = Ix + z
+
+x0 = np.array([0, 1])
+A = np.array([[0, 1], [-1, 0]])
+
+# noise standard deviations
+w_sd = 0.01 # noise on states
+z_sd = 0.05 # noise on outputs
+noise_temporal_sig = 0.15 # temporal smoothing kernel parameter
+
+# Simulate the data
+# NOTE: Data are in shape (number of samples, number of features)
+t_start = 0
+t_end = 2
+t_span = (t_start, t_end)
+dt = 0.1
+ts = np.arange(start=t_start, stop=t_end, step=dt)
+n = int((t_end - t_start) / dt)
+
+# how many terms x and v contain
+m_x = 2
+m_v = 2
+
+# Noises
+# NOTE: correlations between noise terms are 0 with this construction
+seed = 546
+rng = np.random.default_rng(seed)
+ws = np.vstack([
+        generate_noise_conv(n, dt, w_sd ** 2, noise_temporal_sig, rng=rng)
+        for _ in range(m_x)
+    ]).T
+zs = np.vstack([
+        generate_noise_conv(n, dt, z_sd ** 2, noise_temporal_sig, rng=rng)
+        for _ in range(m_x)
+    ]).T
+
+# Running the system with noise
+def f(t, x):
+    # need to interpolate noise at this t separately for each feature
+    noises = []
+    for col in range(ws.shape[1]):
+        noise_col = np.interp(t, ts, ws[:,col])
+        noises.append(noise_col)
+    return A @ x + np.array(noises)
+
+out = solve_ivp(f, t_span, x0, t_eval=ts)
+
+# System
+xs = torch.tensor(out.y.T, dtype=torch.float32)
+ys = torch.tensor(xs + zs, dtype=torch.float32)
+
+vs = torch.zeros((ys.shape[0], 2), dtype=torch.float32)
+v_temporal_sig = 1
+
+if plot:
+    plt.plot(ts, xs[:, 0], label="x0", linestyle="-", color="red")
+    plt.plot(ts, ys[:, 0], label="y0", linestyle="--", color="red")
+    plt.plot(ts, xs[:, 1], label="x1", linestyle="-", color="purple")
+    plt.plot(ts, ys[:, 1], label="y1", linestyle="--", color="purple")
+    plt.legend()
+    plt.show()
+
+# The model is
+# x' = Ax + w
+# y  = Ix + z
+
+def dem_f(x, v, params):
+    params = params.reshape((2,2))
+    return params @ x
+
+def dem_g(x, v, params):
+    return x
+
+# Part 2: Define a DEM model
+p = 3
+p_comp = 6
+
+
+v_autocorr = torch.tensor(noise_cov_gen_theoretical(p, sig=v_temporal_sig, autocorr=autocorr_friston()), dtype=torch.float32)
+v_autocorr_inv_ = torch.linalg.inv(v_autocorr)
+
+noise_autocorr = torch.tensor(noise_cov_gen_theoretical(p, sig=noise_temporal_sig, autocorr=autocorr_friston()), dtype=torch.float32)
+noise_autocorr_inv_ = torch.linalg.inv(noise_autocorr)
+
+omega_w = torch.eye(2)
+omega_z = torch.eye(2)
+
+dem_input = DEMInput(
+    dt=dt,
+    m_x=2,
+    m_v=2, ### <- will always be 0 anyway, just putting it in here to make it simple
+    p=p,
+    p_comp=p_comp,
+    ys=ys,
+    eta_v=vs,
+    p_v=torch.eye(2),
+    v_autocorr_inv=v_autocorr_inv_,
+    eta_theta=torch.tensor([0, 0, 0, 0], dtype=torch.float32),
+    eta_lambda=torch.tensor([0, 0], dtype=torch.float32),
+    p_theta=torch.eye(4, dtype=torch.float32),
+    p_lambda=torch.eye(2, dtype=torch.float32),
+    g=dem_g,
+    f=dem_f,
+    omega_w=torch.eye(2, dtype=torch.float32),
+    omega_z=torch.eye(2, dtype=torch.float32),
+    noise_autocorr_inv=noise_autocorr_inv_,
+        )
+
+# ideal parameters and states
+ideal_mu_x_tildes = list(iterate_generalized(xs, dt, p, p_comp=p_comp))
+ideal_mu_v_tildes = list(repeat(torch.zeros((2 * (p + 1), 1), dtype=torch.float32), len(ideal_mu_x_tildes)))
+ideal_sig_x_tildes = list(repeat(torch.eye(m_x * (p + 1)), len(ideal_mu_x_tildes))) # uhh this probably isn't the ideal
+ideal_sig_v_tildes = list(repeat(torch.eye(m_v * (p + 1)), len(ideal_mu_x_tildes))) # uhh this probably isn't the ideal
+
+if plot:
+    l = np.hstack(ideal_mu_x_tildes).T
+    plt.plot(l[:, 0::2])
+    plt.show()
+
+ideal_mu_x0_tilde = ideal_mu_x_tildes[0].clone()
+ideal_mu_v0_tilde = ideal_mu_v_tildes[0].clone()
+
+ideal_mu_theta = torch.tensor(A.reshape(-1), dtype=torch.float32)#, requires_grad=True)
+ideal_sig_theta = torch.eye(4) * 0.01
+
+ideal_mu_lambda = torch.tensor(np.ones(2)* np.log(0.1), dtype=torch.float32, requires_grad=True)  # idk
+ideal_sig_lambda = torch.eye(2) * 0.01
+
 
 # Starting parameters/hyperparameters, to see how well we can find the true ones
 mu_lambda0 = torch.tensor([0, 0], dtype=torch.float32)
@@ -798,21 +773,6 @@ sig_theta0 = torch.eye(4) * 0.01
 
 sig_x_tilde0 = torch.eye(m_x * (p + 1))
 sig_v_tilde0 = torch.eye(m_v * (p + 1))
-
-def test_state():
-    dem_state = DEMState(
-            input=dem_input,
-            mu_x_tildes=[mu_x_tilde.clone().detach() for mu_x_tilde in ideal_mu_x_tildes],
-            mu_v_tildes=[mu_v_tilde.clone().detach() for mu_v_tilde in ideal_mu_v_tildes],
-            sig_x_tildes=[sig_x_tilde0.clone().detach() for _ in ideal_mu_x_tildes],
-            sig_v_tildes=[sig_v_tilde0.clone().detach() for _ in ideal_mu_v_tildes],
-            mu_theta=mu_theta0.clone().detach(),
-            mu_lambda=mu_lambda0.clone().detach(),
-            sig_theta=sig_theta0.clone().detach(),
-            sig_lambda=sig_lambda0.clone().detach(),
-            mu_x0_tilde=ideal_mu_x0_tilde.clone().detach(),
-            mu_v0_tilde=ideal_mu_v0_tilde.clone().detach())
-    return dem_state
 
 def clean_state():
     """
