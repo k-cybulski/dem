@@ -288,6 +288,8 @@ def free_action(
             mu_lambda, omega_w, omega_z, noise_autocorr_inv, compute_dds=True)
 
         # mean-field terms
+        # FIXME OPT: Section 11.1 of Anil Meera & Wisse shows that gradients
+        # along w_lambda are 0, so it might be unnecessary to compute.
         w_x_tilde, w_v_tilde, w_theta, w_lambda = [
             torch.trace(sig @ (u_c_dd + u_t_dd)) / 2
                 for (sig, u_c_dd, u_t_dd) in [
@@ -853,7 +855,7 @@ lr_thetas = []
 f_bars = []
 
 lr_dynamic = 1
-lr_theta0 = 1
+lr_theta0 =  5
 lr_theta_rate_coeff = 20 # after how many steps does it get to half of lr_theta0
 lr_lambda = 0.01
 iter_lambda = 20
@@ -861,6 +863,7 @@ iter_dem = 200
 
 # DEM procedure
 for i in range(iter_dem):
+    # heuristic for decreasing learning rate
     lr_theta = lr_theta_rate_coeff * lr_theta0 / (i + lr_theta_rate_coeff)
     f_bar = free_action_from_state(dem_state)
     print(f"{i}. {f_bar.item()}")
