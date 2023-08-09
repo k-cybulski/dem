@@ -628,4 +628,4 @@ def dem_step(state: DEMState, lr_dynamic, lr_theta, lr_lambda, iter_lambda, m_mi
     dem_step_d(state, lr_dynamic)
     dem_step_m(state, lr_lambda, iter_lambda, min_improv=m_min_improv)
     dem_step_e(state, lr_theta)
-    dem_step_precision()
+    dem_step_precision(state)

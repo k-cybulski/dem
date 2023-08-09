@@ -624,7 +624,7 @@ def dem_step(state: DEMState, lr_dynamic, lr_theta, lr_lambda, iter_lambda):
     dem_step_d(state, lr_dynamic)
     dem_step_m(state, lr_lambda, iter_lambda)
     dem_step_e(state, lr_theta)
-    dem_step_precision()
+    dem_step_precision(state)
 
 # Part 1: Simulate some data
 # generate data with a simple model that we can invert with DEM
