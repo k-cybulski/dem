@@ -449,7 +449,7 @@ def internal_action_from_state(state: DEMState):
 # y  = g(x, v) + z
 
 ## Simple case
-# x' = Ax + v + w
+# x' = Ax + w
 # y  = Ix + z
 
 x0 = np.array([0, 1])
@@ -512,9 +512,13 @@ if plot:
     plt.legend()
     plt.show()
 
+# The model is
+# x' = Ax + w
+# y  = Ix + z
+
 def dem_f(x, v, params):
     params = params.reshape((2,2))
-    return params @ x + v
+    return params @ x
 
 def dem_g(x, v, params):
     return x
