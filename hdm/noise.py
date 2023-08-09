@@ -69,7 +69,8 @@ def noise_cov_gen_theoretical(p, sig, autocorr):
     """
     Theoretical covariance of a noise signal as a vector in generalized
     coordinates, if the noise has a temporal autocorrelation given by symbolic
-    function `autocorr` with bandwidth `sig`.
+    function `autocorr` with bandwidth `sig`. The shape is (p + 1, p + 1) for
+    the noise signal and p derivatives.
     """
     n = p + 1
     matr = np.empty((n, n))
