@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from copy import copy
 from typing import Callable, Iterable
 from itertools import repeat
 
@@ -178,7 +179,7 @@ def internal_action(
         m_x, m_v, p,
 
         mu_x_tildes, mu_v_tildes,
-        sig_x_tilde, sig_v_tilde,
+        sig_x_tildes, sig_v_tildes,
         y_tildes,
         eta_v_tildes, p_v_tildes,
         omega_w, omega_z, noise_autocorr_inv
@@ -199,9 +200,11 @@ def internal_action(
     u_t_x_tilde_dds = []
     u_t_v_tilde_dds = []
     for t, (mu_x_tilde, mu_v_tilde,
+            sig_x_tilde, sig_v_tilde,
             y_tilde,
             eta_v_tilde, p_v_tilde) in enumerate(
                 zip(mu_x_tildes, mu_v_tildes,
+                    sig_x_tildes, sig_v_tildes,
                     y_tildes,
                     eta_v_tildes, p_v_tildes,
                     strict=True)
@@ -225,7 +228,7 @@ def free_action(
 
         # dynamic terms
         mu_x_tildes, mu_v_tildes, # iterator of state and input mean estimates in generalized coordinates
-        sig_x_tilde, sig_v_tilde, # covariance estimates
+        sig_x_tildes, sig_v_tildes, # as above but for covariance estimates
         y_tildes, # iterator of outputs in generalized coordinates
         eta_v_tildes, p_v_tildes, # iterator of input mean priors
 
@@ -265,9 +268,11 @@ def free_action(
     f_c = u_c + (torch.logdet(sig_theta) + torch.logdet(sig_lambda)) / 2
     f_tsum = 0
     for t, (mu_x_tilde, mu_v_tilde,
+            sig_x_tilde, sig_v_tilde,
             y_tilde,
             eta_v_tilde, p_v_tilde) in enumerate(
                 zip(mu_x_tildes, mu_v_tildes,
+                    sig_x_tildes, sig_v_tildes,
                     y_tildes,
                     eta_v_tildes, p_v_tildes,
                     strict=True)
@@ -295,7 +300,9 @@ def free_action(
 @dataclass
 class DEMInput:
     """
-    The input to DEM. It consists of data, priors, starting values, and transition functions.
+    The input to DEM. It consists of data, priors, starting values, and
+    transition functions. It consists of all the things which remain fixed over
+    the course of DEM optimization.
     """
     # system information
     dt: float
@@ -362,11 +369,11 @@ class DEMState:
     input: DEMInput
 
     # dynamic state estimates
-    # FIXME: Should these just be a tensor?
+    # FIXME (OPT): These should be put in a single tensor for batched operations
     mu_x_tildes: list[torch.Tensor]
     mu_v_tildes: list[torch.Tensor]
-    sig_x_tilde: torch.Tensor
-    sig_v_tilde: torch.Tensor
+    sig_x_tildes: list[torch.Tensor]
+    sig_v_tildes: list[torch.Tensor]
 
     # static parameter and hyperparameter estimates
     mu_theta: torch.Tensor
@@ -378,23 +385,16 @@ class DEMState:
     mu_x0_tilde: torch.Tensor
     mu_v0_tilde: torch.Tensor
 
-    # FIXME: Remove tthese functions, and just rely on the lists (tensors?) directly.
-    def iter_mu_x_tildes(self):
-        yield from self.mu_x_tildes
-
-    def iter_mu_v_tildes(self):
-        yield from self.mu_v_tildes
-
 
 def free_action_from_state(state: DEMState):
     return free_action(
             m_x=state.input.m_x,
             m_v=state.input.m_v,
             p=state.input.p,
-            mu_x_tildes=state.iter_mu_x_tildes(),
-            mu_v_tildes=state.iter_mu_v_tildes(),
-            sig_x_tilde=state.sig_x_tilde,
-            sig_v_tilde=state.sig_v_tilde,
+            mu_x_tildes=state.mu_x_tildes,
+            mu_v_tildes=state.mu_v_tildes,
+            sig_x_tildes=state.sig_x_tildes,
+            sig_v_tildes=state.sig_v_tildes,
             y_tildes=state.input.iter_y_tildes(),
             eta_v_tildes=state.input.iter_eta_v_tildes(),
             p_v_tildes=state.input.iter_p_v_tildes(),
@@ -429,10 +429,10 @@ def internal_action_from_state(state: DEMState):
             m_v=state.input.m_v,
             p=state.input.p,
 
-            mu_x_tildes=state.iter_mu_x_tildes(),
-            mu_v_tildes=state.iter_mu_v_tildes(),
-            sig_x_tilde=state.sig_x_tilde,
-            sig_v_tilde=state.sig_v_tilde,
+            mu_x_tildes=state.mu_x_tildes,
+            mu_v_tildes=state.mu_v_tildes,
+            sig_x_tildes=state.sig_x_tildes,
+            sig_v_tildes=state.sig_v_tildes,
             y_tildes=state.input.iter_y_tildes(),
             eta_v_tildes=state.input.iter_eta_v_tildes(),
             p_v_tildes=state.input.iter_p_v_tildes(),
@@ -556,8 +556,8 @@ dem_input = DEMInput(
 # ideal parameters and states
 ideal_mu_x_tildes = list(iterate_generalized(xs, dt, p, p_comp=p_comp))
 ideal_mu_v_tildes = list(repeat(torch.zeros((2 * (p + 1), 1), dtype=torch.float32), len(ideal_mu_x_tildes)))
-ideal_sig_x_tilde = torch.eye(m_x * (p + 1)), len(ideal_mu_x_tildes) # uhh this probably isn't the ideal
-ideal_sig_v_tilde = torch.eye(m_v * (p + 1)), len(ideal_mu_x_tildes) # uhh this probably isn't the ideal
+ideal_sig_x_tildes = list(repeat(torch.eye(m_x * (p + 1)), len(ideal_mu_x_tildes))) # uhh this probably isn't the ideal
+ideal_sig_v_tildes = list(repeat(torch.eye(m_v * (p + 1)), len(ideal_mu_x_tildes))) # uhh this probably isn't the ideal
 
 if plot:
     l = np.hstack(ideal_mu_x_tildes).T
@@ -578,8 +578,8 @@ dem_state = DEMState(
         input=dem_input,
         mu_x_tildes=ideal_mu_x_tildes,
         mu_v_tildes=ideal_mu_v_tildes,
-        sig_x_tilde=ideal_sig_x_tilde,
-        sig_v_tilde=ideal_sig_v_tilde,
+        sig_x_tildes=ideal_sig_x_tildes,
+        sig_v_tildes=ideal_sig_v_tildes,
         mu_theta=ideal_mu_theta,
         mu_lambda=ideal_mu_lambda,
         sig_theta=ideal_sig_theta,
@@ -602,8 +602,10 @@ def dem_step_d(state: DEMState, lr):
     mu_x_tildes = [mu_x_tilde_t]
     mu_v_tildes = [mu_v_tilde_t]
     for t, (y_tilde,
+         sig_x_tilde, sig_v_tilde,
          eta_v_tilde, p_v_tilde) in enumerate(zip(
                             state.input.iter_y_tildes(),
+                            state.sig_x_tildes, state.sig_v_tildes,
                             state.input.iter_eta_v_tildes(),
                             state.input.iter_p_v_tildes(),
                             strict=True)):
@@ -615,8 +617,8 @@ def dem_step_d(state: DEMState, lr):
                 p=state.input.p,
                 mu_x_tildes=(mu_x_tilde_t,),
                 mu_v_tildes=(mu_v_tilde_t,),
-                sig_x_tilde=state.sig_x_tilde,
-                sig_v_tilde=state.sig_v_tilde,
+                sig_x_tildes=(sig_x_tilde,),
+                sig_v_tildes=(sig_v_tilde,),
                 y_tildes=(y_tilde,),
                 eta_v_tildes=(eta_v_tilde,),
                 p_v_tildes=(p_v_tilde,),
@@ -671,10 +673,10 @@ def dem_step_m(state: DEMState, lr_lambda, iter_lambda, min_improv=0.01):
                 m_x=state.input.m_x,
                 m_v=state.input.m_v,
                 p=state.input.p,
-                mu_x_tildes=state.iter_mu_x_tildes(),
-                mu_v_tildes=state.iter_mu_v_tildes(),
-                sig_x_tilde=state.sig_x_tilde,
-                sig_v_tilde=state.sig_v_tilde,
+                mu_x_tildes=state.mu_x_tildes,
+                mu_v_tildes=state.mu_v_tildes,
+                sig_x_tildes=state.sig_x_tildes,
+                sig_v_tildes=state.sig_v_tildes,
                 y_tildes=state.input.iter_y_tildes(),
                 eta_v_tildes=state.input.iter_eta_v_tildes(),
                 p_v_tildes=state.input.iter_p_v_tildes(),
@@ -701,7 +703,7 @@ def dem_step_m(state: DEMState, lr_lambda, iter_lambda, min_improv=0.01):
         # convergence check
         if last_f_bar is not None:
             if last_f_bar + min_improv > f_bar:
-                print("  reached improvement threshold")
+                print("  (M) reached improvement threshold")
                 break
         last_f_bar = f_bar.clone().detach()
 
@@ -717,10 +719,10 @@ def dem_step_e(state: DEMState, lr_theta):
             m_x=state.input.m_x,
             m_v=state.input.m_v,
             p=state.input.p,
-            mu_x_tildes=state.iter_mu_x_tildes(),
-            mu_v_tildes=state.iter_mu_v_tildes(),
-            sig_x_tilde=state.sig_x_tilde,
-            sig_v_tilde=state.sig_v_tilde,
+            mu_x_tildes=state.mu_x_tildes,
+            mu_v_tildes=state.mu_v_tildes,
+            sig_x_tildes=state.sig_x_tilde,
+            sig_v_tildes=state.sig_v_tilde,
             y_tildes=state.input.iter_y_tildes(),
             eta_v_tildes=state.input.iter_eta_v_tildes(),
             p_v_tildes=state.input.iter_p_v_tildes(),
@@ -752,8 +754,8 @@ def dem_step_ex0(state: DEMState, lr_theta):
     """
     # TODO: should be an if statement comparing new f_bar with old
     def param_free_action(mu_theta, mu_x0_tilde, mu_v0_tilde):
-        mu_x_tildes = list(state.iter_mu_x_tildes())
-        mu_v_tildes = list(state.iter_mu_v_tildes())
+        mu_x_tildes = copy(state.mu_x_tildes)
+        mu_v_tildes = copy(state.mu_v_tildes)
         mu_x_tildes[0] = mu_x0_tilde
         mu_v_tildes[0] = mu_v0_tilde
         # free action as a function of theta
@@ -763,8 +765,8 @@ def dem_step_ex0(state: DEMState, lr_theta):
             p=state.input.p,
             mu_x_tildes=mu_x_tildes,
             mu_v_tildes=mu_v_tildes,
-            sig_x_tilde=state.sig_x_tilde,
-            sig_v_tilde=state.sig_v_tilde,
+            sig_x_tildes=state.sig_x_tildes,
+            sig_v_tildes=state.sig_v_tildes,
             y_tildes=state.input.iter_y_tildes(),
             eta_v_tildes=state.input.iter_eta_v_tildes(),
             p_v_tildes=state.input.iter_p_v_tildes(),
@@ -818,9 +820,8 @@ def dem_step_precision(state: DEMState):
     u, u_theta_dd, u_lambda_dd, u_t_x_tilde_dds, u_t_v_tilde_dds = internal_action_from_state(state)
     state.sig_theta = torch.linalg.inv(-u_theta_dd)
     state.sig_lambda = torch.linalg.inv(-u_lambda_dd)
-    # FIXME: uh, should we do a mean over the hessians here?
-    state.sig_x_tilde = -torch.linalg.inv(torch.mean(torch.stack(u_t_x_tilde_dds, axis=0), 0))
-    state.sig_v_tilde = -torch.linalg.inv(torch.mean(torch.stack(u_t_v_tilde_dds, axis=0), 0))
+    state.sig_x_tildes = [-torch.linalg.inv(u_t_x_tilde_dd) for u_t_x_tilde_dd in u_t_x_tilde_dds]
+    state.sig_v_tildes = [-torch.linalg.inv(u_t_v_tilde_dd) for u_t_v_tilde_dd in u_t_v_tilde_dds]
 
 
 def dem_step(state: DEMState, lr_dynamic, lr_theta, lr_lambda, iter_lambda):
@@ -860,8 +861,8 @@ def test_state():
             input=dem_input,
             mu_x_tildes=[mu_x_tilde.clone().detach() for mu_x_tilde in ideal_mu_x_tildes],
             mu_v_tildes=[mu_v_tilde.clone().detach() for mu_v_tilde in ideal_mu_v_tildes],
-            sig_x_tilde=sig_x_tilde0.clone().detach(),
-            sig_v_tilde=sig_v_tilde0.clone().detach(),
+            sig_x_tildes=[sig_x_tilde0.clone().detach() for _ in ideal_mu_x_tildes],
+            sig_v_tildes=[sig_v_tilde0.clone().detach() for _ in ideal_mu_v_tildes],
             mu_theta=mu_theta0.clone().detach(),
             mu_lambda=mu_lambda0.clone().detach(),
             sig_theta=sig_theta0.clone().detach(),
@@ -878,8 +879,8 @@ def clean_state():
             input=dem_input,
             mu_x_tildes=[torch.zeros_like(mu_x_tilde) for mu_x_tilde in ideal_mu_x_tildes],
             mu_v_tildes=[torch.zeros_like(mu_v_tilde) for mu_v_tilde in ideal_mu_v_tildes],
-            sig_x_tilde=sig_x_tilde0.clone().detach(),
-            sig_v_tilde=sig_v_tilde0.clone().detach(),
+            sig_x_tildes=[sig_x_tilde0.clone().detach() for _ in ideal_mu_x_tildes],
+            sig_v_tildes=[sig_v_tilde0.clone().detach() for _ in ideal_mu_v_tildes],
             mu_theta=mu_theta0.clone().detach(),
             mu_lambda=mu_lambda0.clone().detach(),
             sig_theta=sig_theta0.clone().detach(),
