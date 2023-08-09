@@ -94,6 +94,10 @@ def iterate_generalized(y, dt, p, p_comp=None):
         yield weave_gen((mat @ y[i:(i + p_comp + 1), :])[:(p + 1), :])
 
 
+def len_generalized(n, p_comp):
+    """How many generalized samples are we getting out of a size n sample?"""
+    return n - p_comp - 1
+
 def deriv_mat(p, n):
     """
     Block derivative operator.
