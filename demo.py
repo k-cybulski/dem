@@ -323,7 +323,8 @@ class DEMInput:
     eta_v: torch.Tensor # input sequence (will be transformed to generalized coords by Taylor trick)
     p_v: torch.Tensor # precision
     v_autocorr_inv: torch.Tensor # generalised input vector precision
-    # TODO: How do we construct p_v_tildes? Probably kron(S, P_v)...
+    # TODO: How do we construct p_v_tildes for all times?
+    # For now let's use kron(S, P_v) for a fixed precision prior P_v over all times
 
     # priors on parameters and hyperparameters
     eta_theta: torch.Tensor
