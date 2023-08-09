@@ -457,8 +457,8 @@ x0 = np.array([0, 1])
 A = np.array([[0, 1], [-1, 0]])
 
 # noise standard deviations
-w_sd = 0.0 # noise on states
-z_sd = 0.0 # noise on outputs
+w_sd = 0.01 # noise on states
+z_sd = 0.05 # noise on outputs
 noise_temporal_sig = 0.15 # temporal smoothing kernel parameter
 
 # Simulate the data
