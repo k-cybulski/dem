@@ -796,15 +796,17 @@ def clean_state():
 # dem_static_step(dem_state, lr_theta=0.01, lr_lambda0=0.01, iter_lambda=1)
 
 def extract_dynamic(state: DEMState):
-    mu_xs = torch.stack([mu_x_tilde[:state.input.m_x] for mu_x_tilde in state.mu_x_tildes], axis=0)[:,:,0]
-    mu_vs = torch.stack([mu_v_tilde[:state.input.m_v] for mu_v_tilde in state.mu_v_tildes], axis=0)[:,:,0]
+    mu_xs = torch.stack([mu_x_tilde[:state.input.m_x].clone().detach() for mu_x_tilde in state.mu_x_tildes], axis=0)[:,:,0]
+    sig_xs = torch.stack([sig_x_tilde[:state.input.m_x, :state.input.m_x].clone().detach() for sig_x_tilde in state.sig_x_tildes], axis=0)[:,:,0]
+    mu_vs = torch.stack([mu_v_tilde[:state.input.m_v].clone().detach() for mu_v_tilde in state.mu_v_tildes], axis=0)[:,:,0]
     idx_first = int(state.input.p_comp // 2)
     idx_last = idx_first + len(state.mu_x_tildes)
-    return mu_xs, mu_vs, idx_first, idx_last
+    return mu_xs, sig_xs, mu_vs, idx_first, idx_last
 
 dem_state = clean_state()
 
 mu_xss = []
+sig_xss = []
 mu_vss = []
 mu_thetas = []
 sig_thetas = []
@@ -837,8 +839,9 @@ for i in range(iter_dem):
     dem_step_ex0(dem_state, lr_theta=lr_theta)
     dem_step_precision(dem_state)
 
-    mu_xs, mu_vs, idx_first, idx_last = extract_dynamic(dem_state)
+    mu_xs, sig_xs, mu_vs, idx_first, idx_last = extract_dynamic(dem_state)
     mu_xss.append(mu_xs)
+    sig_xss.append(sig_xs)
     mu_vss.append(mu_vs)
     f_bars.append(f_bar.clone().detach())
     mu_thetas.append(dem_state.mu_theta.clone().detach())
