@@ -4,6 +4,8 @@ action and performs updates by doing automatic differentiation on it, with
 little optimization. Also, it is not very parallelized, since it relies on
 iteration over time as opposed to batch operations on the entire sequence of
 generalized inputs.
+
+It is used to compare against other implementations, to verify their validity.
 """
 from dataclasses import dataclass, field, replace
 from copy import copy
