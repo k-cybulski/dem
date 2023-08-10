@@ -20,18 +20,18 @@ from hdm.dummy import dummy_lti
 
 
 # Generate and simulate a little system
-m_x = 3
-m_v = 2
+m_x = 2
+m_v = 1
 m_y = 2
 
-n = 20
+n = 25
 dt = 0.1
 
 v_sd = 5 # standard deviation on inputs
 v_temporal_sig = 1
 
-w_sd = 0.1 # noise on states
-z_sd = 0.05 # noise on outputs
+w_sd = 0.0 # noise on states
+z_sd = 0.0 # noise on outputs
 noise_temporal_sig = 0.15 # temporal smoothing kernel parameter
 
 seed = 546
@@ -94,19 +94,27 @@ noise_autocorr = torch.tensor(noise_cov_gen_theoretical(p, sig=noise_temporal_si
 noise_autocorr_inv_ = torch.linalg.inv(noise_autocorr)
 
 mu_x0_tilde = torch.normal(torch.zeros((m_x * (p + 1), 1)),
-                           torch.ones((m_x * (p + 1)), 1),
+                           torch.ones((m_x * (p + 1)), 1) / (m_x * (p + 1)),
                            generator=rng_torch)
 sig_x_tilde0 = torch.eye(m_x * (p + 1))
 sig_v_tilde0 = torch.eye(m_v * (p + 1))
 
 params_size = m_x * m_x + m_x * m_v + m_y * m_x + m_y * m_v
 
-mu_theta0 = torch.normal(torch.zeros(params_size), torch.ones(params_size), generator=rng_torch)
-mu_lambda0 = torch.tensor(np.ones(2)* np.log(0.1), dtype=torch.float32)
+# Assume that we confidently know B and C
+eta_theta = torch.zeros(params_size, dtype=torch.float32)
+eta_theta[(m_x*m_x):(m_x*m_x + m_x*m_v)] = B.reshape(-1)
+eta_theta[(m_x*m_x + m_x*m_v):(m_x*m_x + m_x*m_v + m_y * m_x)] = C.reshape(-1)
+p_theta = torch.block_diag(
+        torch.eye(m_x*m_x), torch.eye(m_x*m_v) * np.exp(20).item(),
+         torch.eye(m_y * m_x) * np.exp(20).item(), torch.eye(m_y * m_v))
 
+eta_lambda = torch.zeros(2, dtype=torch.float32)
+p_lambda = torch.eye(2, dtype=torch.float32),
+mu_theta0 = torch.normal(torch.zeros(params_size), torch.ones(params_size) / params_size, generator=rng_torch)
+mu_lambda0 = eta_lambda
 sig_theta0 = torch.eye(params_size, dtype=torch.float32)
 sig_lambda0 = torch.eye(2)
-
 p_v = torch.eye(2) * np.exp(5).item() # high precision on inputs,
 
 def clean_state():
@@ -121,11 +129,11 @@ def clean_state():
         p_comp=p_comp,
         ys=ys,
         eta_v=vs,
-        p_v=torch.eye(m_v),
+        p_v=torch.eye(m_v) * np.exp(5).item(), # high precision on the inputs
         v_autocorr_inv=v_autocorr_inv_,
-        eta_theta=mu_theta0,
+        eta_theta=eta_theta.clone(),
         eta_lambda=mu_lambda0,
-        p_theta=torch.eye(params_size, dtype=torch.float32),
+        p_theta=p_theta.clone(),
         p_lambda=torch.eye(2, dtype=torch.float32),
         g=dem_g,
         f=dem_f,
@@ -155,7 +163,7 @@ f_bar_hist = []
 table_rows = []
 
 lr_dynamic = 1
-lr_theta =  0.5
+lr_theta =  0.1
 lr_lambda = 0.01
 iter_lambda = 20
 iter_dem = 50
@@ -190,7 +198,8 @@ for i in tqdm(range(iter_dem)):
     params_hist.append(params_now)
     f_bar_hist.append(f_bar.clone().detach().item())
     table_rows.append(table_row)
-    print(tabulate(table_rows, headers=table_header, floatfmt='.2f'))
+    print(tabulate(table_rows, headers='keys', floatfmt='.2f'))
+    print(f'lambda: {dem_state.mu_lambda}')
 
 table_headers = list(table_rows[0].keys())
 
