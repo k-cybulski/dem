@@ -743,7 +743,8 @@ dem_input = DEMInput(
     noise_autocorr_inv=noise_autocorr_inv_,
         )
 
-# ideal parameters and states
+# ideal states
+## used during development as an "oracle" for what the states ought to be
 ideal_mu_x_tildes = list(iterate_generalized(xs, dt, p, p_comp=p_comp))
 ideal_mu_v_tildes = list(repeat(torch.zeros((2 * (p + 1), 1), dtype=torch.float32), len(ideal_mu_x_tildes)))
 ideal_sig_x_tildes = list(repeat(torch.eye(m_x * (p + 1)), len(ideal_mu_x_tildes))) # uhh this probably isn't the ideal
@@ -756,12 +757,6 @@ if plot:
 
 ideal_mu_x0_tilde = ideal_mu_x_tildes[0].clone()
 ideal_mu_v0_tilde = ideal_mu_v_tildes[0].clone()
-
-ideal_mu_theta = torch.tensor(A.reshape(-1), dtype=torch.float32)#, requires_grad=True)
-ideal_sig_theta = torch.eye(4) * 0.01
-
-ideal_mu_lambda = torch.tensor(np.ones(2)* np.log(0.1), dtype=torch.float32, requires_grad=True)  # idk
-ideal_sig_lambda = torch.eye(2) * 0.01
 
 
 # Starting parameters/hyperparameters, to see how well we can find the true ones
@@ -802,6 +797,9 @@ def extract_dynamic(state: DEMState):
     idx_first = int(state.input.p_comp // 2)
     idx_last = idx_first + len(state.mu_x_tildes)
     return mu_xs, sig_xs, mu_vs, idx_first, idx_last
+
+
+# Part 3: Run the DEM procedure
 
 dem_state = clean_state()
 
