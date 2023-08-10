@@ -461,6 +461,8 @@ def internal_action_from_state(state: DEMState):
 def clear_gradients_on_state(state: DEMState):
     state.mu_theta = state.mu_theta.detach().clone().requires_grad_()
     state.mu_lambda = state.mu_lambda.detach().clone().requires_grad_()
+    state.mu_x0_tilde = state.mu_x0_tilde.detach().clone().requires_grad_()
+    state.mu_v0_tilde = state.mu_v0_tilde.detach().clone().requires_grad_()
 
 def dem_step_d(state: DEMState, lr):
     """
@@ -631,12 +633,12 @@ def dem_step_precision(state: DEMState):
     state.sig_v_tildes = [-torch.linalg.inv(u_t_v_tilde_dd) for u_t_v_tilde_dd in u_t_v_tilde_dds]
 
 
-def dem_step(state: DEMState, lr_dynamic, lr_theta, lr_lambda, iter_lambda):
+def dem_step(state: DEMState, lr_dynamic, lr_theta, lr_lambda, iter_lambda, min_improv):
     """
     Does an iteration of DEM.
     """
     dem_step_d(state, lr_dynamic)
-    dem_step_m(state, lr_lambda, iter_lambda)
+    dem_step_m(state, lr_lambda, iter_lambda, min_improv)
     dem_step_e(state, lr_theta)
     dem_step_precision(state)
 
