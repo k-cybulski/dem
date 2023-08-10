@@ -103,6 +103,14 @@ def internal_energy_static(
         # compute hessians used for mean-field terms in free action
         compute_dds: bool
         ):
+    """
+    Computes static terms of the internal energy, along with necessary
+    Hessians. These are the precision-weighted errors and precision log
+    determinants on the parameters and hyperparameters.
+
+    These terms are added in the internal energy formula only once,
+    in contrast to dynamic terms which are a sum over all time.
+    """
     # Computes some terms of the internal energy along with necessary Hessians
     u_c_theta = _int_eng_par_static(mu_theta, eta_theta, p_theta)
     u_c_lambda = _int_eng_par_static(mu_lambda, eta_lambda, p_lambda)
@@ -119,6 +127,12 @@ def internal_energy_static(
 def internal_energy_dynamic(
         g, f, mu_x_tilde, mu_v_tilde, y_tilde, m_x, m_v, p, mu_theta, eta_v_tilde, p_v_tilde,
         mu_lambda, omega_w, omega_z, noise_autocorr_inv, compute_dds):
+    """
+    Computes dynamic terms of the internal energy for a single timestep, along
+    with necessary Hessians. These are the precision-weighted errors and
+    precision log determinants on the dynamic states. Hessians are returned for
+    parameters theta and hyperparameters lambda as well.
+    """
     deriv_mat_x = torch.from_numpy(deriv_mat(p, m_x)).to(dtype=torch.float32)
     # make a temporary function which we can use to compute hessians w.r.t. the relevant parameters
     # for the computation of mean-field terms
@@ -535,7 +549,6 @@ def dem_step_m(state: DEMState, lr_lambda, iter_lambda, min_improv):
             return free_action_from_state(replace(state, mu_lambda=mu_lambda))
         clear_gradients_on_state(state)
         f_bar = free_action_from_state(state)
-        print(f"  (M) {i}. f_bar={f_bar.item():.4f}, lambda={state.mu_lambda}")
         lambda_d = lr_lambda * torch.autograd.grad(f_bar, state.mu_lambda)[0]
         lambda_dd = lr_lambda * torch.autograd.functional.hessian(lambda_free_action, state.mu_lambda)
         step_matrix = (torch.matrix_exp(lambda_dd) - torch.eye(lambda_dd.shape[0])) @ torch.linalg.inv(lambda_dd)
@@ -543,7 +556,6 @@ def dem_step_m(state: DEMState, lr_lambda, iter_lambda, min_improv):
         # convergence check
         if last_f_bar is not None:
             if last_f_bar + min_improv > f_bar:
-                print("  (M) reached improvement threshold")
                 break
         last_f_bar = f_bar.clone().detach()
 
@@ -608,6 +620,9 @@ def dem_step_ex0(state: DEMState, lr_theta):
     state.mu_x0_tilde = state.mu_x0_tilde + step_matrix_x0_tilde @ x0_tilde_d
     state.mu_v0_tilde = state.mu_v0_tilde + step_matrix_v0_tilde @ v0_tilde_d
 
+    state.mu_x_tildes[0] = state.mu_x0_tilde
+    state.mu_v_tildes[0] = state.mu_v0_tilde
+
 
 def dem_step_precision(state: DEMState):
     """
@@ -621,11 +636,14 @@ def dem_step_precision(state: DEMState):
     state.sig_v_tildes = [-torch.linalg.inv(u_t_v_tilde_dd) for u_t_v_tilde_dd in u_t_v_tilde_dds]
 
 
-def dem_step(state: DEMState, lr_dynamic, lr_theta, lr_lambda, iter_lambda, m_min_improv=0.01):
+def dem_step(state: DEMState, lr_dynamic, lr_theta, lr_lambda, iter_lambda, m_min_improv=0.01, update_x0=True):
     """
     Does an iteration of DEM.
     """
     dem_step_d(state, lr_dynamic)
     dem_step_m(state, lr_lambda, iter_lambda, min_improv=m_min_improv)
-    dem_step_e(state, lr_theta)
+    if update_x0:
+        dem_step_ex0(state, lr_theta)
+    else:
+        dem_step_e(state, lr_theta)
     dem_step_precision(state)
