@@ -6,7 +6,8 @@ import numpy as np
 from scipy.integrate import solve_ivp
 from .noise import generate_noise_conv
 
-def sin_gen(n, t):
+def sin_gen(p, t):
+    n = p + 1
     matr = np.zeros((n, 1))
     for i in range(n):
         i_mod = np.mod(i, 4)
@@ -21,8 +22,8 @@ def sin_gen(n, t):
                 matr[i, 0] = -np.cos(t)
     return matr
 
-def cos_gen(n, t):
-    sin_gen_ = sin_gen(n + 1, t)
+def cos_gen(p, t):
+    sin_gen_ = sin_gen(p + 1, t)
     return sin_gen_[1:]
 
 def combine_gen(gen1, gen2):

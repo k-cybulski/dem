@@ -24,7 +24,7 @@ def plot_taylor_approx_for_sin():
     plt.plot(ts, xs, color='red')
 
     for t in ts_to_check:
-        x_gen = sin_gen(p + 1, t)
+        x_gen = sin_gen(p, t)
         x_appr = taylor_mat(p, dt) @ x_gen
         ts_for_appr = t - np.ceil(p/2) * dt + ((np.arange(p + 1)) * dt)
         plt.plot(ts_for_appr, x_appr, color='green')
@@ -50,8 +50,8 @@ def plot_taylor_approx_for_sin_cos():
     plt.plot(ts, x2s, color='pink')
 
     for t in ts_to_check:
-        x1_gen = sin_gen(p + 1, t)
-        x2_gen = cos_gen(p + 1, t)
+        x1_gen = sin_gen(p, t)
+        x2_gen = cos_gen(p, t)
         x_gen = combine_gen(x1_gen, x2_gen)
         t_mat = np.kron(taylor_mat(p, dt), np.eye(2))
         x_appr = t_mat @ x_gen
@@ -88,7 +88,7 @@ def plot_taylor_inv_for_sin():
         x_gen_appr = np.linalg.inv(taylor_mat(p, dt)) @ xs_to_inv
 
         t0 = ts[n0]
-        x_gen_target = sin_gen(p + 1, t0)
+        x_gen_target = sin_gen(p, t0)
 
         # Where do the derivatives differ?
         plt.plot(np.abs(x_gen_appr - x_gen_target), label=f'p = {p}')
@@ -108,7 +108,7 @@ def plot_taylor_inv_for_sin():
         x_gen_appr = np.linalg.inv(taylor_mat(p, dt)) @ xs_to_inv
 
         t0 = ts[n0]
-        x_gen_target = sin_gen(p + 1, t0)
+        x_gen_target = sin_gen(p, t0)
 
         # Where do the derivatives differ?
         plt.plot(np.abs(x_gen_appr - x_gen_target) / np.abs( x_gen_target), label=f'p = {p}')
