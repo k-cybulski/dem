@@ -24,7 +24,7 @@ m_x = 3
 m_v = 2
 m_y = 2
 
-n = 30
+n = 20
 dt = 0.1
 
 v_sd = 5 # standard deviation on inputs
@@ -82,6 +82,8 @@ rng_torch = torch.random.manual_seed(156)
 
 p = 3
 p_comp = 6
+
+ideal_mu_x_tildes = list(iterate_generalized(xs, dt, p, p_comp=p_comp))
 
 n_gen = len_generalized(n, p_comp)
 
@@ -159,8 +161,6 @@ iter_lambda = 20
 iter_dem = 50
 m_min_improv = 0.01
 
-table_header = ('Iteration', 'F_bar', 'A', 'B', 'C', 'D', 'Total (s)', 'D (s)', 'E (s)', 'M (s)', 'Prec (s)', 'M (iter)')
-
 for i in tqdm(range(iter_dem)):
     t0 = time()
     benchmark_ts = dem_step(dem_state, lr_dynamic, lr_theta, lr_lambda, iter_lambda, m_min_improv=m_min_improv, benchmark=True)
@@ -168,27 +168,35 @@ for i in tqdm(range(iter_dem)):
     params_now = [p.clone().detach() for p in ABCD_from_params(dem_state.mu_theta)]
     f_bar = free_action_from_state(dem_state)
 
-    table_row = (i + 1,
-                 f_bar.detach().item(),
-                 torch.linalg.matrix_norm(A - params_now[0]).item(),
-                 torch.linalg.matrix_norm(B - params_now[1]).item(),
-                 torch.linalg.matrix_norm(C - params_now[2]).item(),
-                 torch.linalg.matrix_norm(D - params_now[3]).item(),
-                 tstep,
-                 sum(benchmark_ts['ts_d']),
-                 benchmark_ts['t_e'],
-                 sum(benchmark_ts['ts_m']),
-                 benchmark_ts['t_prec'],
-                 len(benchmark_ts['ts_m'])
-                 )
+    table_row = {
+            'Iteration': i + 1,
+            'F_bar': f_bar.detach().item(),
+            'A': torch.linalg.matrix_norm(A - params_now[0]).item(),
+            'B': torch.linalg.matrix_norm(B - params_now[1]).item(),
+            'C': torch.linalg.matrix_norm(C - params_now[2]).item(),
+            'D': torch.linalg.matrix_norm(D - params_now[3]).item(),
+            'x0_tilde': torch.linalg.matrix_norm(dem_state.mu_x0_tilde - ideal_mu_x_tildes[0]).item(),
+            'xT_tilde': torch.linalg.matrix_norm(dem_state.mu_x_tildes[-1] - ideal_mu_x_tildes[-1]).item(),
+            'Total (s)': tstep,
+            'D (s)': sum(benchmark_ts['ts_d']),
+            'D (iter)': len(benchmark_ts['ts_d']),
+            'D (s/iter)': sum(benchmark_ts['ts_d'])/len(benchmark_ts['ts_d']),
+            'E (s)': benchmark_ts['t_e'],
+            'M (s)': sum(benchmark_ts['ts_m']),
+            'M (iter)':  len(benchmark_ts['ts_m']),
+            'M (s/iter)':  sum(benchmark_ts['ts_m'])/len(benchmark_ts['ts_m']),
+            'Prec (s)': benchmark_ts['t_prec'],
+                 }
     params_hist.append(params_now)
     f_bar_hist.append(f_bar.clone().detach().item())
     table_rows.append(table_row)
     print(tabulate(table_rows, headers=table_header, floatfmt='.2f'))
 
+table_headers = list(table_rows[0].keys())
+
 outpath = Path('out/benchmark-naive.csv')
 outpath.parent.mkdir(exist_ok=True)
 with open(outpath, 'w') as file_:
-    writer = csv.writer(file_)
-    writer.writerow(table_header)
+    writer = csv.DictWriter(file_, table_headers)
+    writer.writeheader()
     writer.writerows(table_rows)
