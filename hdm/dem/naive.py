@@ -11,6 +11,7 @@ from dataclasses import dataclass, field, replace
 from copy import copy
 from typing import Callable, Iterable
 from itertools import repeat
+from time import time
 
 import torch
 
@@ -466,7 +467,7 @@ def clear_gradients_on_state(state: DEMState):
     state.mu_lambda = state.mu_lambda.detach().clone().requires_grad_()
 
 
-def dem_step_d(state: DEMState, lr):
+def dem_step_d(state: DEMState, lr, benchmark=False):
     """
     Performs the D step of DEM.
     """
@@ -475,6 +476,9 @@ def dem_step_d(state: DEMState, lr):
     mu_v_tilde_t = state.mu_v0_tilde.clone().detach()
     mu_x_tildes = [mu_x_tilde_t]
     mu_v_tildes = [mu_v_tilde_t]
+    if benchmark:
+        benchmark_t0 = time()
+        benchmark_ts = []
     for t, (y_tilde,
          sig_x_tilde, sig_v_tilde,
          eta_v_tilde, p_v_tilde) in enumerate(zip(
@@ -532,17 +536,25 @@ def dem_step_d(state: DEMState, lr):
         mu_v_tilde_t = mu_v_tilde_t.clone().detach()
         mu_x_tildes.append(mu_x_tilde_t)
         mu_v_tildes.append(mu_v_tilde_t)
+        if benchmark:
+            benchmark_ts.append(time() - benchmark_t0)
+            benchmark_t0 = time()
     mu_x_tildes = mu_x_tildes[:-1] # there is one too many
     mu_v_tildes = mu_v_tildes[:-1]
     state.mu_x_tildes = mu_x_tildes
     state.mu_v_tildes = mu_v_tildes
+    if benchmark:
+        return benchmark_ts
 
-def dem_step_m(state: DEMState, lr_lambda, iter_lambda, min_improv):
+def dem_step_m(state: DEMState, lr_lambda, iter_lambda, min_improv, benchmark=False):
     """
     Performs the noise hyperparameter update (step M) of DEM.
     """
     # FIXME: Do 'until convergence' rather than 'for some fixed number of steps'
     last_f_bar = None
+    if benchmark:
+        benchmark_t0 = time()
+        benchmark_ts = []
     for i in range(iter_lambda):
         def lambda_free_action(mu_lambda):
             # free action as a function of lambda
@@ -558,6 +570,11 @@ def dem_step_m(state: DEMState, lr_lambda, iter_lambda, min_improv):
             if last_f_bar + min_improv > f_bar:
                 break
         last_f_bar = f_bar.clone().detach()
+        if benchmark:
+            benchmark_ts.append(time() - benchmark_t0)
+            benchmark_t0 = time()
+    if benchmark:
+        return benchmark_ts
 
 
 def dem_step_e(state: DEMState, lr_theta):
@@ -636,14 +653,22 @@ def dem_step_precision(state: DEMState):
     state.sig_v_tildes = [-torch.linalg.inv(u_t_v_tilde_dd) for u_t_v_tilde_dd in u_t_v_tilde_dds]
 
 
-def dem_step(state: DEMState, lr_dynamic, lr_theta, lr_lambda, iter_lambda, m_min_improv=0.01, update_x0=True):
+def dem_step(state: DEMState, lr_dynamic, lr_theta, lr_lambda, iter_lambda, m_min_improv=0.01, update_x0=True, benchmark=False):
     """
     Does an iteration of DEM.
     """
-    dem_step_d(state, lr_dynamic)
-    dem_step_m(state, lr_lambda, iter_lambda, min_improv=m_min_improv)
+    benchmark_ts_d = dem_step_d(state, lr_dynamic, benchmark=benchmark)
+    benchmark_ts_m = dem_step_m(state, lr_lambda, iter_lambda, min_improv=m_min_improv, benchmark=benchmark)
+    if benchmark:
+        benchmark_t0 = time()
     if update_x0:
         dem_step_ex0(state, lr_theta)
     else:
         dem_step_e(state, lr_theta)
+    if benchmark:
+        benchmark_te = time() - benchmark_t0
+        benchmark_t0 = time()
     dem_step_precision(state)
+    if benchmark:
+        benchmark_tprec = time() - benchmark_t0
+        return {'ts_d': benchmark_ts_d, 'ts_m': benchmark_ts_m, 't_e': benchmark_te, 't_prec': benchmark_tprec}
