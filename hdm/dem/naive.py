@@ -465,6 +465,8 @@ def internal_action_from_state(state: DEMState):
 def clear_gradients_on_state(state: DEMState):
     state.mu_theta = state.mu_theta.detach().clone().requires_grad_()
     state.mu_lambda = state.mu_lambda.detach().clone().requires_grad_()
+    state.mu_x0_tilde = state.mu_x0_tilde.detach().clone().requires_grad_()
+    state.mu_v0_tilde = state.mu_v0_tilde.detach().clone().requires_grad_()
 
 
 def dem_step_d(state: DEMState, lr, benchmark=False):
