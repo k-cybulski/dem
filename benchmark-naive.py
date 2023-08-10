@@ -2,6 +2,9 @@ from dataclasses import dataclass, field, replace
 from copy import copy
 from typing import Callable, Iterable
 from itertools import repeat
+from time import time
+import csv
+from pathlib import Path
 
 from tabulate import tabulate
 from tqdm import tqdm
@@ -150,19 +153,21 @@ f_bar_hist = []
 table_rows = []
 
 lr_dynamic = 1
-lr_theta =  0.1
-lr_theta_rate_coeff = 20 # after how many steps does it get to half of lr_theta0
+lr_theta =  0.5
 lr_lambda = 0.01
 iter_lambda = 20
 iter_dem = 50
 m_min_improv = 0.01
 
 for i in tqdm(range(iter_dem)):
+    t0 = time()
     dem_step(dem_state, lr_dynamic, lr_theta, lr_lambda, iter_lambda, m_min_improv=m_min_improv)
+    tstep = time() - t0
     params_now = [p.clone().detach() for p in ABCD_from_params(dem_state.mu_theta)]
     f_bar = free_action_from_state(dem_state)
 
-    table_row = (i,
+    table_row = (i + 1,
+                 tstep,
                  f_bar.detach().item(),
                  torch.linalg.matrix_norm(A - params_now[0]).item(),
                  torch.linalg.matrix_norm(B - params_now[1]).item(),
@@ -170,5 +175,12 @@ for i in tqdm(range(iter_dem)):
                  torch.linalg.matrix_norm(D - params_now[3]).item())
     params_hist.append(params_now)
     f_bar_hist.append(f_bar.clone().detach().item())
-    table_rows.append(table_roW)
-    print(tabulate(table_rows, headers=('Iteration', 'F_bar', 'A', 'B', 'C', 'D')))
+    table_rows.append(table_row)
+    print(tabulate(table_rows, headers=('Iteration', 'Duration (s)', 'F_bar', 'A', 'B', 'C', 'D'), floatfmt='.2f'))
+
+outpath = Path('out/benchmark-naive.csv')
+outpath.parent.mkdir(exist_ok=True)
+with open(outpath) as file_:
+    writer = csv.writer(file_)
+    writer.writerow(('Iteration', 'Duration (s)', 'F_bar', 'A', 'B', 'C', 'D'))
+    writer.writerows(table_rows)
