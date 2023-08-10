@@ -99,6 +99,14 @@ def internal_energy_static(
         # compute hessians used for mean-field terms in free action
         compute_dds: bool
         ):
+    """
+    Computes static terms of the internal energy, along with necessary
+    Hessians. These are the precision-weighted errors and precision log
+    determinants on the parameters and hyperparameters.
+
+    These terms are added in the internal energy formula only once,
+    in contrast to dynamic terms which are a sum over all time.
+    """
     # Computes some terms of the internal energy along with necessary Hessians
     u_c_theta = _int_eng_par_static(mu_theta, eta_theta, p_theta)
     u_c_lambda = _int_eng_par_static(mu_lambda, eta_lambda, p_lambda)
@@ -115,6 +123,12 @@ def internal_energy_static(
 def internal_energy_dynamic(
         g, f, mu_x_tilde, mu_v_tilde, y_tilde, m_x, m_v, p, mu_theta, eta_v_tilde, p_v_tilde,
         mu_lambda, omega_w, omega_z, noise_autocorr_inv, compute_dds):
+    """
+    Computes dynamic terms of the internal energy for a single timestep, along
+    with necessary Hessians. These are the precision-weighted errors and
+    precision log determinants on the dynamic states. Hessians are returned for
+    parameters theta and hyperparameters lambda as well.
+    """
     deriv_mat_x = torch.from_numpy(deriv_mat(p, m_x)).to(dtype=torch.float32)
     # make a temporary function which we can use to compute hessians w.r.t. the relevant parameters
     # for the computation of mean-field terms
@@ -184,7 +198,7 @@ def internal_action(
         omega_w, omega_z, noise_autocorr_inv
         ):
     """
-    Computes internal energy/action, and hessians. Used to update precisions at the end of a
+    Computes internal energy/action, and Hessians. Used to update precisions at the end of a
     DEM iteration.
     """
     u, u_theta_dd, u_lambda_dd = internal_energy_static(
@@ -254,7 +268,6 @@ def free_action(
         # generalized noise temporal autocorrelation inverse (precision)
         noise_autocorr_inv,
         ):
-
     u_c, u_c_theta_dd, u_c_lambda_dd = internal_energy_static(
         mu_theta,
         mu_lambda,
@@ -282,7 +295,8 @@ def free_action(
 
         # mean-field terms
         # FIXME OPT: Section 11.1 of Anil Meera & Wisse shows that gradients
-        # along w_lambda are 0, so it might be unnecessary to compute.
+        # along w_lambda are 0, so it might be unnecessary to compute for
+        # parameter updates.
         w_x_tilde, w_v_tilde, w_theta, w_lambda = [
             torch.trace(sig @ (u_c_dd + u_t_dd)) / 2
                 for (sig, u_c_dd, u_t_dd) in [
@@ -302,7 +316,7 @@ def free_action(
 class DEMInput:
     """
     The input to DEM. It consists of data, priors, starting values, and
-    transition functions. It consists of all the things which remain fixed over
+    transition functions, so of all the things which remain fixed over
     the course of DEM optimization.
     """
     # system information
