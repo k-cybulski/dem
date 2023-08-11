@@ -42,7 +42,7 @@ def generate_noise_conv(n: int, dt: float, var: float, sig: float,
         kern_size = ceil(150 / dt) # rule of thumb for relatively good approximation
     kern = gaussian_conv_kern(kern_size, dt, sig)
     white_size = n + kern_size - 1
-    white = np.random.normal(np.zeros(white_size), 1)
+    white = rng.normal(np.zeros(white_size), 1)
     conved = np.convolve(white, kern, mode='valid')
     # Adjust variance following Eq. (11) from Example 7.4 of
     #   D. R. Cox and H. M. Miller, The Theory of Stochastic Processes.
