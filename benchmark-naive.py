@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field, replace
-from copy import copy
+from copy import copy, deepcopy
 from typing import Callable, Iterable
 from itertools import repeat
 from time import time
@@ -101,13 +101,14 @@ sig_v_tilde0 = torch.eye(m_v * (p + 1))
 
 params_size = m_x * m_x + m_x * m_v + m_y * m_x + m_y * m_v
 
-# Assume that we confidently know B and C
+# Assume that we confidently know C and D
 eta_theta = torch.zeros(params_size, dtype=torch.float32)
-eta_theta[(m_x*m_x):(m_x*m_x + m_x*m_v)] = B.reshape(-1)
-eta_theta[(m_x*m_x + m_x*m_v):(m_x*m_x + m_x*m_v + m_y * m_x)] = C.reshape(-1)
+# eta_theta[(m_x*m_x):(m_x*m_x + m_x*m_v)] = B.reshape(-1) # B
+eta_theta[(m_x*m_x + m_x*m_v):(m_x*m_x + m_x*m_v + m_y * m_x)] = C.reshape(-1) # C
+eta_theta[(m_x*m_x + m_x*m_v + m_y * m_x):(m_x*m_x + m_x*m_v + m_y * m_x + m_y * m_v)] = D.reshape(-1) # D
 p_theta = torch.block_diag(
-        torch.eye(m_x*m_x), torch.eye(m_x*m_v) * np.exp(20).item(),
-         torch.eye(m_y * m_x) * np.exp(20).item(), torch.eye(m_y * m_v))
+        torch.eye(m_x*m_x), torch.eye(m_x*m_v),
+         torch.eye(m_y * m_x) * np.exp(6).item(), torch.eye(m_y * m_v) * np.exp(6).item())
 
 eta_lambda = torch.zeros(2, dtype=torch.float32)
 p_lambda = torch.eye(2, dtype=torch.float32),
@@ -115,7 +116,7 @@ mu_theta0 = torch.normal(torch.zeros(params_size), torch.ones(params_size) / par
 mu_lambda0 = eta_lambda
 sig_theta0 = torch.eye(params_size, dtype=torch.float32)
 sig_lambda0 = torch.eye(2)
-p_v = torch.eye(2) * np.exp(5).item() # high precision on inputs,
+p_v = torch.eye(2) * np.exp(6).item() # high precision on inputs,
 
 def clean_state():
     """
@@ -158,23 +159,89 @@ def clean_state():
 
 dem_state = clean_state()
 
-params_hist = []
-f_bar_hist = []
-table_rows = []
-
 lr_dynamic = 1
-lr_theta =  0.1
+lr_theta =  0.05
 lr_lambda = 0.01
 iter_lambda = 20
 iter_dem = 50
 m_min_improv = 0.01
 
+# ... interlude from test_dem.py ...
+from test_dem import dummy_dem_state, naive
+# FIXME
+
+m_x = 2
+m_v = 1
+m_y = 2
+
+n = 15
+dt = 0.1
+
+p = 4
+p_comp = 6
+
+w_sd = 0.1 # noise on states
+z_sd = 0.05 # noise on outputs
+noise_temporal_sig = 0.15 # temporal smoothing kernel parameter
+v_temporal_sig = 1 # temporal smoothness of inputs
+
+dem_state_naive, groundtruth = dummy_dem_state(
+        m_x, m_v, m_y, n, dt, p, p_comp, w_sd, z_sd,
+        noise_temporal_sig, v_temporal_sig,
+        seed=513, known_matrices=('B', 'C', 'D'))
+
+dem_state = dem_state_naive
+
+naive.dem_step_d(dem_state, 1)
+
+A = groundtruth['A']
+B = groundtruth['B']
+C = groundtruth['C']
+D = groundtruth['D']
+x0 = groundtruth['x0']
+xs = groundtruth['xs']
+vs = groundtruth['vs']
+ws = groundtruth['ws']
+zs = groundtruth['zs']
+
+params_hist = []
+f_bar_hist = []
+table_rows = []
+dem_states = [copy(dem_state)]
+
+ideal_mu_x_tildes = list(iterate_generalized(xs, dt, p, p_comp=p_comp))
+
+f_bar = free_action_from_state(dem_state)
+params_now = [p.clone().detach() for p in ABCD_from_params(dem_state.mu_theta)]
+
+table_row = {
+        'Iteration': 0,
+        'F_bar': f_bar.detach().item(),
+        'A': torch.linalg.matrix_norm(A - params_now[0]).item(),
+        'B': torch.linalg.matrix_norm(B - params_now[1]).item(),
+        'C': torch.linalg.matrix_norm(C - params_now[2]).item(),
+        'D': torch.linalg.matrix_norm(D - params_now[3]).item(),
+        'x0_tilde': torch.linalg.matrix_norm(dem_state.mu_x0_tilde - ideal_mu_x_tildes[0]).item(),
+        'xT_tilde': torch.linalg.matrix_norm(dem_state.mu_x_tildes[-1] - ideal_mu_x_tildes[-1]).item(),
+        'Total (s)': None,
+        'D (s)': None,
+        'D (iter)': None,
+        'D (s/iter)': None,
+        'E (s)': None,
+        'M (s)': None,
+        'M (iter)':  None,
+        'M (s/iter)':  None,
+        'Prec (s)': None,
+             }
+table_rows.append(table_row)
+print(tabulate(table_rows, headers='keys', floatfmt='.2f'))
+
 for i in tqdm(range(iter_dem)):
+    f_bar = free_action_from_state(dem_state)
     t0 = time()
     benchmark_ts = dem_step(dem_state, lr_dynamic, lr_theta, lr_lambda, iter_lambda, m_min_improv=m_min_improv, benchmark=True)
     tstep = time() - t0
     params_now = [p.clone().detach() for p in ABCD_from_params(dem_state.mu_theta)]
-    f_bar = free_action_from_state(dem_state)
 
     table_row = {
             'Iteration': i + 1,
@@ -198,8 +265,8 @@ for i in tqdm(range(iter_dem)):
     params_hist.append(params_now)
     f_bar_hist.append(f_bar.clone().detach().item())
     table_rows.append(table_row)
+    dem_states.append(copy(dem_state))
     print(tabulate(table_rows, headers='keys', floatfmt='.2f'))
-    print(f'lambda: {dem_state.mu_lambda}')
 
 table_headers = list(table_rows[0].keys())
 
