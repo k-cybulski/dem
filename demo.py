@@ -326,6 +326,7 @@ class DEMInput:
     # how many terms are there in the states x, inputs v?
     m_x: int
     m_v: int
+    m_y: int
     # how many derivatives to track
     p: int
     p_comp: int # can be equal to p or greater
@@ -725,8 +726,8 @@ def dem_g(x, v, params):
     return x
 
 # Part 2: Define a DEM model
-p = 3
-p_comp = 6
+p = 4
+p_comp = p
 
 
 v_autocorr = torch.tensor(noise_cov_gen_theoretical(p, sig=v_temporal_sig, autocorr=autocorr_friston()), dtype=torch.float32)
@@ -742,6 +743,7 @@ dem_input = DEMInput(
     dt=dt,
     m_x=2,
     m_v=2, ### <- will always be 0 anyway, just putting it in here to make it simple
+    m_y=2,
     p=p,
     p_comp=p_comp,
     ys=ys,

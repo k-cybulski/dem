@@ -54,7 +54,7 @@ def _fix_grad_shape(tensor):
     elif tensor.dim() == 4 and tensor.shape[1] == 1 and tensor.shape[3] == 1:
         return tensor.reshape((tensor.shape[0], tensor.shape[2]))
     else:
-        raise ValueError("Unexpected hessian shape")
+        raise ValueError(f"Unexpected hessian shape: {tuple(tensor.shape)}")
 
 def generalized_func(func, mu_x_tilde, mu_v_tilde, m_x, m_v, p, params):
     """
@@ -79,6 +79,17 @@ def generalized_func(func, mu_x_tilde, mu_v_tilde, m_x, m_v, p, params):
     mu_x_grad, mu_v_grad = torch.autograd.functional.jacobian(lambda x, v: func(x, v, params), (mu_x, mu_v), create_graph=True)
     mu_x_grad = _fix_grad_shape(mu_x_grad)
     mu_v_grad = _fix_grad_shape(mu_v_grad)
+
+    # Note that this inelegant below loop can be replaced by e.g. einsum.
+    # However, an einsum implementation like this one below turns out to be
+    # slower.
+    #
+    #   mu_x_tilde_r = mu_x_tilde.reshape((p + 1, m_x))
+    #   mu_v_tilde_r = mu_v_tilde.reshape((p + 1, m_v))
+    #   func_appl_d_x = torch.einsum('kj,dj->dk', mu_x_grad, mu_x_tilde_r[1:,:]).reshape((-1, 1))
+    #   func_appl_d_v = torch.einsum('kj,dj->dk', mu_v_grad, mu_v_tilde_r[1:,:]).reshape((-1, 1))
+    #   return torch.concat((func_appl, func_appl_d_x + func_appl_d_v), dim=0)
+
     func_appl_d = []
     for deriv in range(1, p + 1):
         mu_x_d = mu_x_tilde[deriv*m_x:(deriv+1)*m_x]
@@ -330,9 +341,10 @@ class DEMInput:
     dt: float
     n: int = field(init=False) # length of system will be determined from ys
 
-    # how many terms are there in the states x, inputs v?
+    # how many terms are there in the states x, inputs v, and outputs y?
     m_x: int
     m_v: int
+    m_y: int
     # how many derivatives to track
     p: int
     p_comp: int # can be equal to p or greater
@@ -357,9 +369,9 @@ class DEMInput:
     f: Callable # state transition
 
     # Noise correlation and temporal autocorrelation structure
-    omega_w: torch.Tensor
-    omega_z: torch.Tensor
     noise_autocorr_inv: torch.Tensor
+    omega_w: torch.Tensor = None
+    omega_z: torch.Tensor = None
 
     def __post_init__(self):
         if self.ys.ndim == 1:
@@ -369,6 +381,10 @@ class DEMInput:
             self.p_comp = self.p
         # FIXME: Do it more efficiently! It's easy
         self._iter_length = len(list(self.iter_y_tildes()))
+        if self.omega_w is None:
+            self.omega_w = torch.eye(self.m_x)
+        if self.omega_z is None:
+            self.omega_z = torch.eye(self.m_y)
 
     def iter_y_tildes(self):
         return iterate_generalized(self.ys, self.dt, self.p, p_comp=self.p_comp)
@@ -674,3 +690,12 @@ def dem_step(state: DEMState, lr_dynamic, lr_theta, lr_lambda, iter_lambda, m_mi
     if benchmark:
         benchmark_tprec = time() - benchmark_t0
         return {'ts_d': benchmark_ts_d, 'ts_m': benchmark_ts_m, 't_e': benchmark_te, 't_prec': benchmark_tprec}
+
+
+def extract_dynamic(state: DEMState):
+    mu_xs = torch.stack([mu_x_tilde[:state.input.m_x].clone().detach() for mu_x_tilde in state.mu_x_tildes], axis=0)[:,:,0]
+    sig_xs = torch.stack([sig_x_tilde[:state.input.m_x, :state.input.m_x].clone().detach() for sig_x_tilde in state.sig_x_tildes], axis=0)[:,:,0]
+    mu_vs = torch.stack([mu_v_tilde[:state.input.m_v].clone().detach() for mu_v_tilde in state.mu_v_tildes], axis=0)[:,:,0]
+    idx_first = int(state.input.p_comp // 2)
+    idx_last = idx_first + len(mu_xs)
+    return mu_xs, sig_xs, mu_vs, idx_first, idx_last
