@@ -594,7 +594,7 @@ def test_internal_energy_dynamic_speed():
     nrun = 20
 
     t_naives = []
-    t_onehess = []
+    t_onehesses = []
     t_batcheds = []
 
     table_rows = []
@@ -618,7 +618,7 @@ def test_internal_energy_dynamic_speed():
 
         y_tildes_b, eta_v_tildes_b, p_v_tildes_b, mu_x_tildes_b, mu_v_tildes_b = [
                 torch.stack(ls) for ls in
-                [y_tildes_n, eta_v_tildes_n, p_v_tildes_n, mu_x_tildes_n, mu_v_tildes_n]]
+                [y_tildes, eta_v_tildes, p_v_tildes, mu_x_tildes, mu_v_tildes]]
 
         t_naive = timeit.timeit(lambda: [
             internal_energy_dynamic_naive(
@@ -639,7 +639,7 @@ def test_internal_energy_dynamic_speed():
                 eta_v_tildes,
                 p_v_tildes)
         ], number=nrun)
-        t_oneness = timeit.timeit(lambda: [
+        t_onehess = timeit.timeit(lambda: [
             internal_energy_dynamic_onehess(
                 dem_state.input.g,
                 dem_state.input.f,
@@ -670,16 +670,16 @@ def test_internal_energy_dynamic_speed():
                 dem_state.input.omega_z,
                 dem_state.input.noise_autocorr_inv), number=nrun)
         t_naives.append(t_naive)
-        t_onehess.append(t_onehess)
+        t_onehesses.append(t_onehess)
         t_batcheds.append(t_batched)
         table_rows.append({
             'n': n,
             't_naive (sec per 20 runs)': t_naives[-1],
-            't_onehess (sec per 20 runs)': t_onehess[-1],
+            't_onehess (sec per 20 runs)': t_onehesses[-1],
             't_batched (sec per 20 runs)': t_batcheds[-1]})
     print(tabulate(table_rows, headers='keys'))
     plt.plot(ns, t_naives, label='Naive')
-    plt.plot(ns, t_onehess, label='One Hess')
+    plt.plot(ns, t_onehesses, label='One Hess')
     plt.plot(ns, t_batcheds, label='Batched')
     plt.legend()
     plt.show()
