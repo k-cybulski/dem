@@ -342,26 +342,6 @@ def test_internal_energy_dynamic_correctness():
         assert torch.isclose(torch.sum(torch.stack(tup1), axis=0), tensor2,
                              rtol=1e-04).all()
 
-    # Scribbly scrib
-    def dem_f_b(x, v, params):
-        params = params.reshape((2,2))
-        return torch.matmul(params, x)
-
-    def dem_g_b(x, v, params):
-        return x
-
-    f = dem_f_b
-    g = dem_g_b
-    mu_x_tildes = mu_x_tildes_b
-    mu_v_tildes = mu_v_tildes_b
-    y_tildes = y_tildes_b
-    eta_v_tildes = eta_v_tildes_b
-    p_v_tildes = p_v_tildes_b
-    noise_autocorr_inv = dem_state.input.noise_autocorr_inv
-
-    n_batch = mu_x_tildes.shape[0]
-
-    # We're in the function now
 
 def test_internal_energy_dynamic_speed():
     ns = [10, 25, 50, 100, 250, 500, 1000]
@@ -371,7 +351,7 @@ def test_internal_energy_dynamic_speed():
     dem_states = {}
     for idx, n in enumerate(ns):
         rng = np.random.default_rng(25)
-        dem_state = dummy_dem_simple(n)
+        dem_state = dummy_dem_simple(n, rng=rng)
         dem_states[n] = dem_state
         times.append({
             't_naive': [],
@@ -478,20 +458,214 @@ def test_internal_energy_dynamic_speed():
             print("Interim table:")
             print(tabulate(table_rows, headers='keys'))
     print(tabulate(table_rows, headers='keys'))
-    plt.plot(ns, t_naives, label='Naive')
-    plt.plot(ns, t_onehesses, label='One Hess')
-    plt.plot(ns, t_batcheds, label='Batched')
-    plt.plot(ns, t_batched_manyhesses, label='Batched Many Hess')
+
+    for key in times[0].keys():
+        series = [np.mean(times[idx][key]) for idx in range(ns)]
+        plt.plot(ns, series, label=key)
     plt.legend()
     plt.show()
+
+##
+## free_action
+##
+
+def test_free_action_correctness():
+    n = 30
+    rng = np.random.default_rng(25)
+    dem_state = dummy_dem_simple(n, rng=rng)
+
+    y_tildes_n = list(dem_state.input.iter_y_tildes())
+    eta_v_tildes_n = list(dem_state.input.iter_eta_v_tildes())
+    p_v_tildes_n = list(dem_state.input.iter_p_v_tildes())
+    mu_x_tildes_n = dem_state.mu_x_tildes
+    mu_v_tildes_n = dem_state.mu_v_tildes
+    omega_w = dem_state.input.omega_w
+    omega_z = dem_state.input.omega_z
+    m_x = dem_state.input.m_x
+    m_v = dem_state.input.m_v
+    p = dem_state.input.p
+    mu_theta = dem_state.mu_theta
+    mu_lambda = dem_state.mu_lambda
+
+    y_tildes_b, eta_v_tildes_b, p_v_tildes_b, mu_x_tildes_b, mu_v_tildes_b = [
+            torch.stack(ls) for ls in
+            [y_tildes_n, eta_v_tildes_n, p_v_tildes_n, mu_x_tildes_n, mu_v_tildes_n]]
+    sig_x_tildes_b = torch.stack(dem_state.sig_x_tildes)
+    sig_v_tildes_b = torch.stack(dem_state.sig_v_tildes)
+
+    f_bar_naive = free_action_naive(
+            m_x=dem_state.input.m_x,
+            m_v=dem_state.input.m_v,
+            p=dem_state.input.p,
+            mu_x_tildes=dem_state.mu_x_tildes,
+            mu_v_tildes=dem_state.mu_v_tildes,
+            sig_x_tildes=dem_state.sig_x_tildes,
+            sig_v_tildes=dem_state.sig_v_tildes,
+            y_tildes=dem_state.input.iter_y_tildes(),
+            eta_v_tildes=dem_state.input.iter_eta_v_tildes(),
+            p_v_tildes=dem_state.input.iter_p_v_tildes(),
+            eta_theta=dem_state.input.eta_theta,
+            eta_lambda=dem_state.input.eta_lambda,
+            p_theta=dem_state.input.p_theta,
+            p_lambda=dem_state.input.p_lambda,
+            mu_theta=dem_state.mu_theta,
+            mu_lambda=dem_state.mu_lambda,
+            sig_theta=dem_state.sig_theta,
+            sig_lambda=dem_state.sig_lambda,
+            g=dem_state.input.g,
+            f=dem_state.input.f,
+            omega_w=dem_state.input.omega_w,
+            omega_z=dem_state.input.omega_z,
+            noise_autocorr_inv=dem_state.input.noise_autocorr_inv)
+
+    f_bar_batched = free_action_batched(
+            m_x=dem_state.input.m_x,
+            m_v=dem_state.input.m_v,
+            p=dem_state.input.p,
+            mu_x_tildes=mu_x_tildes_b,
+            mu_v_tildes=mu_v_tildes_b,
+            sig_x_tildes=sig_x_tildes_b,
+            sig_v_tildes=sig_v_tildes_b,
+            y_tildes=y_tildes_b,
+            eta_v_tildes=eta_v_tildes_b,
+            p_v_tildes=p_v_tildes_b,
+            eta_theta=dem_state.input.eta_theta,
+            eta_lambda=dem_state.input.eta_lambda,
+            p_theta=dem_state.input.p_theta,
+            p_lambda=dem_state.input.p_lambda,
+            mu_theta=dem_state.mu_theta,
+            mu_lambda=dem_state.mu_lambda,
+            sig_theta=dem_state.sig_theta,
+            sig_lambda=dem_state.sig_lambda,
+            g=dem_state.input.g,
+            f=dem_state.input.f,
+            omega_w=dem_state.input.omega_w,
+            omega_z=dem_state.input.omega_z,
+            noise_autocorr_inv=dem_state.input.noise_autocorr_inv)
+
+    # The relative tolerance has to be very high, because these terms don't
+    # seem particularly numerically stable...
+    assert torch.isclose(f_bar_naive, f_bar_batched, rtol=1e-03).item()
+
+def test_free_action_speed():
+    ns = [10, 100, 250, 500, 1000]
+    nrun = 20
+
+    times = []
+    dem_states = {}
+    for idx, n in enumerate(ns):
+        rng = np.random.default_rng(25)
+        dem_state = dummy_dem_simple(n, rng=rng)
+        dem_states[n] = dem_state
+        times.append({
+            't_naive': [],
+            't_batched': [],
+        })
+
+    table_rows = [{}] * len(times)
+
+    for run_num in range(nrun):
+        for idx, n in enumerate(ns):
+            dem_state = dem_states[n]
+
+            y_tildes = list(dem_state.input.iter_y_tildes())
+            eta_v_tildes = list(dem_state.input.iter_eta_v_tildes())
+            p_v_tildes = list(dem_state.input.iter_p_v_tildes())
+            mu_x_tildes = dem_state.mu_x_tildes
+            mu_v_tildes = dem_state.mu_v_tildes
+            omega_w = dem_state.input.omega_w
+            omega_z = dem_state.input.omega_z
+            m_x = dem_state.input.m_x
+            m_v = dem_state.input.m_v
+            p = dem_state.input.p
+            mu_theta = dem_state.mu_theta
+            mu_lambda = dem_state.mu_lambda
+
+            y_tildes_b, eta_v_tildes_b, p_v_tildes_b, mu_x_tildes_b, mu_v_tildes_b = [
+                    torch.stack(ls) for ls in
+                    [y_tildes, eta_v_tildes, p_v_tildes, mu_x_tildes, mu_v_tildes]]
+            sig_x_tildes_b = torch.stack(dem_state.sig_x_tildes)
+            sig_v_tildes_b = torch.stack(dem_state.sig_v_tildes)
+
+            t_naive = timeit.timeit(lambda:  free_action_naive(
+                m_x=dem_state.input.m_x,
+                m_v=dem_state.input.m_v,
+                p=dem_state.input.p,
+                mu_x_tildes=dem_state.mu_x_tildes,
+                mu_v_tildes=dem_state.mu_v_tildes,
+                sig_x_tildes=dem_state.sig_x_tildes,
+                sig_v_tildes=dem_state.sig_v_tildes,
+                y_tildes=dem_state.input.iter_y_tildes(),
+                eta_v_tildes=dem_state.input.iter_eta_v_tildes(),
+                p_v_tildes=dem_state.input.iter_p_v_tildes(),
+                eta_theta=dem_state.input.eta_theta,
+                eta_lambda=dem_state.input.eta_lambda,
+                p_theta=dem_state.input.p_theta,
+                p_lambda=dem_state.input.p_lambda,
+                mu_theta=dem_state.mu_theta,
+                mu_lambda=dem_state.mu_lambda,
+                sig_theta=dem_state.sig_theta,
+                sig_lambda=dem_state.sig_lambda,
+                g=dem_state.input.g,
+                f=dem_state.input.f,
+                omega_w=dem_state.input.omega_w,
+                omega_z=dem_state.input.omega_z,
+                noise_autocorr_inv=dem_state.input.noise_autocorr_inv),
+                                    number=nrun)
+            times[idx]['t_naive'].append(t_naive)
+
+            t_batched = timeit.timeit(lambda: free_action_batched(
+                m_x=dem_state.input.m_x,
+                m_v=dem_state.input.m_v,
+                p=dem_state.input.p,
+                mu_x_tildes=mu_x_tildes_b,
+                mu_v_tildes=mu_v_tildes_b,
+                sig_x_tildes=sig_x_tildes_b,
+                sig_v_tildes=sig_v_tildes_b,
+                y_tildes=y_tildes_b,
+                eta_v_tildes=eta_v_tildes_b,
+                p_v_tildes=p_v_tildes_b,
+                eta_theta=dem_state.input.eta_theta,
+                eta_lambda=dem_state.input.eta_lambda,
+                p_theta=dem_state.input.p_theta,
+                p_lambda=dem_state.input.p_lambda,
+                mu_theta=dem_state.mu_theta,
+                mu_lambda=dem_state.mu_lambda,
+                sig_theta=dem_state.sig_theta,
+                sig_lambda=dem_state.sig_lambda,
+                g=dem_state.input.g,
+                f=dem_state.input.f,
+                omega_w=dem_state.input.omega_w,
+                omega_z=dem_state.input.omega_z,
+                noise_autocorr_inv=dem_state.input.noise_autocorr_inv),
+                                               number=nrun)
+            times[idx]['t_batched'].append(t_batched)
+            table_rows[idx] = {
+                'n': n,
+                't_manyhess': np.mean(times[idx]['t_naive']),
+                't_batched': np.mean(times[idx]['t_batched']),
+                'as of': run_num + 1,
+                }
+            print("Interim table:")
+            print(tabulate(table_rows, headers='keys'))
+    print(tabulate(table_rows, headers='keys'))
+
+    for key in times[0].keys():
+        series = [np.mean(times[idx][key]) for idx in range(ns)]
+        plt.plot(ns, series, label=key)
+    plt.legend()
+    plt.show()
+
 
 
 if __name__ == '__main__':
     print("Checking correctness...")
     test_generalized_func_correctness()
     test_internal_energy_dynamic_correctness()
+    test_free_action_correctness()
 
     print("Running speed benchmarks...")
     test_generalized_func_speed()
     test_internal_energy_dynamic_speed()
+    test_free_action_speed()
     pass

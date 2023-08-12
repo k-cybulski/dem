@@ -1,5 +1,5 @@
 
-from hdm.core import iterate_generalized, deriv_mat
+from hdm.core import deriv_mat
 from hdm.dem.naive import kron
 import torch
 
