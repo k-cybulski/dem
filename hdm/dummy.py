@@ -34,13 +34,101 @@ def combine_gen(gen1, gen2):
     return out
 
 
-def simulate_colored_lti(A, B, C, D, x0, n, dt, vs,
+def wrap_with_innovations(ts, ws, vs):
+    """
+    Adds linearly interpolated noises w and inputs v to a function f(x, v), and
+    returns a function f(t, x) which can be put in an ODE solver. This allows
+    for simulating a convolution of noisy innovations. In other words, it
+    allows for simulating a system
+
+        x' = f(x, v) + w
+    """
+    def wrapper(func):
+        def f(t, x):
+            # FIXME OPT: Vectorize?
+            noises = []
+            for col in range(ws.shape[1]):
+                noise_col = np.interp(t, ts, ws[:,col])
+                noises.append(noise_col)
+            w = np.array(noises)
+
+            vsin = []
+            for col in range(vs.shape[1]):
+                v_col = np.interp(t, ts, vs[:,col])
+                vsin.append(noise_col)
+            v = np.array(vsin)
+            return func(x, v) + w
+        return f
+    return wrapper
+
+
+def simulate_system(f, g, x0, dt, vs, w_sd, z_sd, noise_temporal_sig, rng=None):
+    """
+    Simulates a system defined by
+
+        x' = f(x, v) + w
+        g  = g(x, v) + z
+
+    for colored noises w and z.
+
+    The functions take and return 1-dimensional numpy arrays.
+
+    x0 is shape (m_x,)
+    vs is shape (n, m_v)
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    elif not isinstance(rng, np.random.Generator):
+        rng = np.random.default_rng(rng)
+
+    n = vs.shape[0]
+    t_start = 0
+    t_end = n * dt
+    t_span = (t_start, t_end)
+    ts = np.arange(start=t_start, stop=t_end, step=dt)
+    n = int((t_end - t_start) / dt)
+    m_x = len(x0)
+    m_v = vs.shape[1]
+
+    out_of_0 = g(x0, vs[0]) # used to check shapes of output
+    if np.ndim(out_of_0) == 0:
+        m_y = 1
+    else:
+        m_y = out_of_0.shape[0]
+
+    ws = np.vstack([
+            generate_noise_conv(n, dt, w_sd ** 2, noise_temporal_sig, rng=rng)
+            for _ in range(m_x)
+        ]).T
+    zs = np.vstack([
+            generate_noise_conv(n, dt, z_sd ** 2, noise_temporal_sig, rng=rng)
+            for _ in range(m_y)
+        ]).T
+
+    @wrap_with_innovations(ts, ws, vs)
+    def ode_f(x, v):
+        return f(x, v)
+
+    out = solve_ivp(ode_f, t_span, x0, t_eval=ts)
+    xs = out.y.T
+
+    gs = np.array([
+        g(x, v).reshape(-1) for x, v in zip(xs, vs)
+    ])
+    ys = gs + zs
+
+    return ts, xs, ys, ws, zs
+
+
+def simulate_colored_lti(A, B, C, D, x0, dt, vs,
                          w_sd, z_sd, noise_temporal_sig, rng):
     """
     Simulates an LTI system with colored noise.
 
     x' = Ax + Bv + w
     y  = Cx + Dv + z
+
+    The number of timesteps is decided by length of inputs v
 
     Args:
         A, B, C, D: numpy matrices defining the LTI system
@@ -59,51 +147,12 @@ def simulate_colored_lti(A, B, C, D, x0, n, dt, vs,
     assert B.shape[1] == D.shape[1] # B and D accept input vectors v
     assert C.shape[0] == D.shape[0] # C and D output the same shape of vectors
 
-    t_start = 0
-    t_end = n * dt
-    t_span = (t_start, t_end)
-    ts = np.arange(start=t_start, stop=t_end, step=dt)
-    n = int((t_end - t_start) / dt)
-    m_x = A.shape[0]
-    m_v = B.shape[1]
-    m_y = C.shape[0]
+    def f(x, v):
+        return A @ x + B @ v
 
-    # generate noises
-    if rng is None:
-        rng = np.random.default_rng()
-    elif not isinstance(rng, np.random.Generator):
-        rng = np.random.default_rng(rng)
-    ws = np.vstack([
-            generate_noise_conv(n, dt, w_sd ** 2, noise_temporal_sig, rng=rng)
-            for _ in range(m_x)
-        ]).T
-    zs = np.vstack([
-            generate_noise_conv(n, dt, z_sd ** 2, noise_temporal_sig, rng=rng)
-            for _ in range(m_y)
-        ]).T
-
-    # function to run the systems with noise
-    def f(t, x):
-        # need to interpolate noise at this t separately for each feature
-        # the interpolation points should overlap with the ts sampled by the
-        # ODE solver, but we're doing this interpolation just in case
-        noises = []
-        for col in range(ws.shape[1]):
-            noise_col = np.interp(t, ts, ws[:,col])
-            noises.append(noise_col)
-
-        vsin = []
-        for col in range(vs.shape[1]):
-            v_col = np.interp(t, ts, vs[:,col])
-            vsin.append(noise_col)
-        return A @ x + B @ np.array(vsin) + np.array(noises)
-
-    out = solve_ivp(f, t_span, x0, t_eval=ts)
-
-    xs = out.y.T
-    ys = (C @ xs.T).T + (D @ vs.T).T + zs
-
-    return ts, xs, ys, ws, zs
+    def g(x, v):
+        return C @ x + D @ v
+    return simulate_system(f, g, x0, dt, vs, w_sd, z_sd, noise_temporal_sig, rng=rng)
 
 def dummy_lti(m_x, m_v, m_y, n, dt,
               v_sd, v_temporal_sig,
@@ -125,6 +174,6 @@ def dummy_lti(m_x, m_v, m_y, n, dt,
         generate_noise_conv(n, dt, v_sd ** 2, v_temporal_sig, rng=rng)
         for _ in range(m_v)
     ]).T
-    ts, xs, ys, ws, zs = simulate_colored_lti(A, B, C, D, x0, n, dt, vs,
+    ts, xs, ys, ws, zs = simulate_colored_lti(A, B, C, D, x0, dt, vs,
                                               w_sd, z_sd, noise_temporal_sig, rng)
     return A, B, C, D, x0, ts, vs, xs, ys, ws, zs
