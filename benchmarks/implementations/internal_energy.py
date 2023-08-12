@@ -1,4 +1,11 @@
 
+from hdm.core import iterate_generalized, deriv_mat
+from hdm.dem.naive import kron
+import torch
+
+from .util import _fix_grad_shape, _fix_grad_shape_batch
+from .generalized_func import generalized_func_batched
+from .generalized_func import generalized_func_naive as generalized_func
 
 def internal_energy_dynamic_naive(
         g, f, mu_x_tilde, mu_v_tilde, y_tilde, m_x, m_v, p, mu_theta, eta_v_tilde, p_v_tilde,

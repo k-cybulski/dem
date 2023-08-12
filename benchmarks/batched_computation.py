@@ -234,16 +234,13 @@ def test_generalized_func_speed():
 ## internal_energy_dynamic
 ##
 
-
 def _clone_list_of_tensors(ls):
     return [l.clone().detach() for l in ls]
 
-
-# def test_internal_energy_dynamic_correctness():
-if __name__ == '__main__':
+def test_internal_energy_dynamic_correctness():
     n = 30
     rng = np.random.default_rng(25)
-    dem_state = dummy_dem_simple(n)
+    dem_state = dummy_dem_simple(n, rng=rng)
 
     y_tildes_n = list(dem_state.input.iter_y_tildes())
     eta_v_tildes_n = list(dem_state.input.iter_eta_v_tildes())
@@ -490,6 +487,11 @@ def test_internal_energy_dynamic_speed():
 
 
 if __name__ == '__main__':
+    print("Checking correctness...")
     test_generalized_func_correctness()
+    test_internal_energy_dynamic_correctness()
+
+    print("Running speed benchmarks...")
     test_generalized_func_speed()
+    test_internal_energy_dynamic_speed()
     pass
