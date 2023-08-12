@@ -11,7 +11,10 @@ from matplotlib import pyplot as plt
 
 from hdm.dummy import sin_gen, cos_gen, combine_gen
 from hdm.dem.naive import _fix_grad_shape
-# from hdm.dem.batched import generalized_func as generalized_func_batched
+
+##
+## generalized_func
+##
 
 def _fix_grad_shape_batch(tensor):
     ndim = tensor.dim()
@@ -49,16 +52,6 @@ def generalized_func_naive(func, mu_x_tilde, mu_v_tilde, m_x, m_v, p, params):
     mu_x_grad, mu_v_grad = torch.autograd.functional.jacobian(lambda x, v: func(x, v, params), (mu_x, mu_v), create_graph=True)
     mu_x_grad = _fix_grad_shape(mu_x_grad)
     mu_v_grad = _fix_grad_shape(mu_v_grad)
-
-    # Note that this inelegant below loop can be replaced by e.g. einsum.
-    # However, an einsum implementation like this one below turns out to be
-    # slower.
-    #
-    #   mu_x_tilde_r = mu_x_tilde.reshape((p + 1, m_x))
-    #   mu_v_tilde_r = mu_v_tilde.reshape((p + 1, m_v))
-    #   func_appl_d_x = torch.einsum('kj,dj->dk', mu_x_grad, mu_x_tilde_r[1:,:]).reshape((-1, 1))
-    #   func_appl_d_v = torch.einsum('kj,dj->dk', mu_v_grad, mu_v_tilde_r[1:,:]).reshape((-1, 1))
-    #   return torch.concat((func_appl, func_appl_d_x + func_appl_d_v), dim=0)
 
     func_appl_d = []
     for deriv in range(1, p + 1):
@@ -208,8 +201,8 @@ def test_generalized_func_speed():
             't_batcheds (sec per 100 runs)': t_batcheds[-1]})
     print(tabulate(table_rows, headers='keys'))
     plt.plot(ns, t_naives, label='Naive')
-    plt.plot(ns, t_naives, label='Einsum')
-    plt.plot(ns, t_naives, label='Batched')
+    plt.plot(ns, t_einsums, label='Einsum')
+    plt.plot(ns, t_batcheds, label='Batched')
     plt.legend()
     plt.show()
 
