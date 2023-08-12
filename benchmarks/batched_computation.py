@@ -423,6 +423,49 @@ def internal_energy_dynamic_onehess(
     u_t_lambda_dd = _fix_grad_shape(u_t_lambda_dd)
     return u_t, u_t_x_tilde_dd, u_t_v_tilde_dd, u_t_theta_dd, u_t_lambda_dd
 
+def internal_energy_dynamic_batched_manyhess(
+        g, f, mu_x_tildes, mu_v_tildes, y_tildes, m_x, m_v, p, mu_theta, eta_v_tildes, p_v_tildes,
+        mu_lambda, omega_w, omega_z, noise_autocorr_inv):
+    deriv_mat_x = torch.from_numpy(deriv_mat(p, m_x)).to(dtype=torch.float32)
+
+    def _int_eng_dynamic(mu_x_tildes, mu_v_tildes, mu_theta, mu_lambda):
+        mu_theta = mu_theta
+        mu_lambda = mu_lambda
+        g_tildes = generalized_func_batched(g, mu_x_tildes, mu_v_tildes, m_x, m_v, p, mu_theta)
+        f_tildes = generalized_func_batched(f, mu_x_tildes, mu_v_tildes, m_x, m_v, p, mu_theta)
+
+        err_y = y_tildes - g_tildes
+        err_v = mu_v_tildes - eta_v_tildes
+        err_x = torch.matmul(deriv_mat_x, mu_x_tildes) - f_tildes
+
+        n_batch = mu_x_tildes.shape[0]
+
+        mu_lambda_z = mu_lambda[0]
+        mu_lambda_w = mu_lambda[1]
+        prec_z = torch.exp(mu_lambda_z) * omega_z
+        prec_w = torch.exp(mu_lambda_w) * omega_w
+        prec_z_tilde = kron(noise_autocorr_inv, prec_z)
+        prec_w_tilde = kron(noise_autocorr_inv, prec_w)
+
+        u_t_y_ = -torch.bmm(err_y.mT, torch.matmul(prec_z_tilde, err_y)).reshape(n_batch) + torch.logdet(prec_z_tilde)
+        u_t_v_ = -torch.bmm(err_v.mT, torch.bmm(p_v_tildes, err_v)).reshape(n_batch) + torch.logdet(p_v_tildes)
+        u_t_x_ = -torch.bmm(err_x.mT, torch.matmul(prec_w_tilde, err_x)).reshape(n_batch) + torch.logdet(prec_w_tilde)
+
+        u_t = (u_t_y_ + u_t_v_ + u_t_x_) / 2
+        return u_t
+
+    u_t = _int_eng_dynamic(mu_x_tildes, mu_v_tildes, mu_theta, mu_lambda)
+    u_t_x_tilde_dd = torch.autograd.functional.hessian(lambda mu: torch.sum(_int_eng_dynamic(mu, mu_v_tildes, mu_theta, mu_lambda)), mu_x_tildes, create_graph=True)
+    u_t_v_tilde_dd = torch.autograd.functional.hessian(lambda mu: torch.sum(_int_eng_dynamic(mu_x_tildes, mu, mu_theta, mu_lambda)), mu_v_tildes, create_graph=True)
+    u_t_theta_dd = torch.autograd.functional.hessian(lambda mu: torch.sum(_int_eng_dynamic(mu_x_tildes, mu_v_tildes, mu, mu_lambda)), mu_theta, create_graph=True)
+    u_t_lambda_dd = torch.autograd.functional.hessian(lambda mu: torch.sum(_int_eng_dynamic(mu_x_tildes, mu_v_tildes, mu_theta, mu)), mu_lambda, create_graph=True)
+
+    u_t_x_tilde_dd = _fix_grad_shape_batch(u_t_x_tilde_dd)
+    u_t_v_tilde_dd = _fix_grad_shape_batch(u_t_v_tilde_dd)
+    u_t_theta_dd  = _fix_grad_shape(u_t_theta_dd)
+    u_t_lambda_dd = _fix_grad_shape(u_t_lambda_dd)
+    return u_t, u_t_x_tilde_dd, u_t_v_tilde_dd, u_t_theta_dd, u_t_lambda_dd
+
 def internal_energy_dynamic_batched(
         g, f, mu_x_tildes, mu_v_tildes, y_tildes, m_x, m_v, p, mu_theta, eta_v_tildes, p_v_tildes,
         mu_lambda, omega_w, omega_z, noise_autocorr_inv):
@@ -552,6 +595,18 @@ if __name__ == '__main__':
             dem_state.input.omega_z,
             dem_state.input.noise_autocorr_inv)
 
+    out_batched_manyhess = internal_energy_dynamic_batched_manyhess(
+            dem_state.input.g,
+            dem_state.input.f,
+            mu_x_tildes_b, mu_v_tildes_b, y_tildes_b, m_x, m_v, p,
+            dem_state.mu_theta,
+            eta_v_tildes_b,
+            p_v_tildes_b,
+            dem_state.mu_lambda,
+            dem_state.input.omega_w,
+            dem_state.input.omega_z,
+            dem_state.input.noise_autocorr_inv)
+
     # need to do an awkward transpose
     out_naive_listed = list(zip(*out_naive))
 
@@ -596,6 +651,7 @@ def test_internal_energy_dynamic_speed():
     t_naives = []
     t_onehesses = []
     t_batcheds = []
+    t_batched_manyhesses = []
 
     table_rows = []
 
@@ -669,18 +725,35 @@ def test_internal_energy_dynamic_speed():
                 dem_state.input.omega_w,
                 dem_state.input.omega_z,
                 dem_state.input.noise_autocorr_inv), number=nrun)
+        t_batched_manyhess = timeit.timeit(lambda :internal_energy_dynamic_batched_manyhess(
+                dem_state.input.g,
+                dem_state.input.f,
+                mu_x_tildes_b, mu_v_tildes_b, y_tildes_b, m_x, m_v, p,
+                dem_state.mu_theta,
+                eta_v_tildes_b,
+                p_v_tildes_b,
+                dem_state.mu_lambda,
+                dem_state.input.omega_w,
+                dem_state.input.omega_z,
+                dem_state.input.noise_autocorr_inv), number=nrun)
         t_naives.append(t_naive)
         t_onehesses.append(t_onehess)
         t_batcheds.append(t_batched)
+        t_batched_manyhesses.append(t_batched_manyhess)
         table_rows.append({
             'n': n,
             't_naive (sec per 20 runs)': t_naives[-1],
             't_onehess (sec per 20 runs)': t_onehesses[-1],
-            't_batched (sec per 20 runs)': t_batcheds[-1]})
+            't_batched (sec per 20 runs)': t_batcheds[-1],
+            't_batched_manyhess (sec per 20 runs)': t_batched_manyhesses[-1]
+            })
+        print("Interim table:")
+        print(tabulate(table_rows, headers='keys'))
     print(tabulate(table_rows, headers='keys'))
     plt.plot(ns, t_naives, label='Naive')
     plt.plot(ns, t_onehesses, label='One Hess')
     plt.plot(ns, t_batcheds, label='Batched')
+    plt.plot(ns, t_batched_manyhesses, label='Batched Many Hess')
     plt.legend()
     plt.show()
 
