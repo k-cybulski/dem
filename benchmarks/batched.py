@@ -15,7 +15,7 @@ from hdm.noise import autocorr_friston, noise_cov_gen_theoretical
 from hdm.dummy import simulate_system
 from hdm.dem.batched import DEMInput, DEMState, dem_step_d, dem_step_precision
 from hdm.dem.naive import extract_dynamic
-from hdm.dem.batched import DEMState, DEMInput, dem_step_d
+from hdm.dem.batched import DEMState, DEMInput, dem_step_d, dem_step
 
 
 @pytest.fixture
@@ -53,12 +53,11 @@ def dummy_dem_lorenz():
     # Test DEM inversion
     ## We will use the real parameters with high precision
     ## our goal is to just find the proper states
-
     p = 4
     p_comp = p
 
     x0_test = np.array([12,13,16])
-    p_v = torch.tensor(np.exp(5).reshape((1, 1)), dtype=torch.float32)
+    p_v = torch.tensor(np.exp(3).reshape((1, 1)), dtype=torch.float32)
 
     # doesn't matter, v is 0 anyway
     v_temporal_sig = 5
@@ -123,8 +122,18 @@ def dummy_dem_lorenz():
     dem_state = DEMState.from_input(dem_input, mu_x0)
     return dem_state
 
-# Tests for crash and for profiling
-def test_step_d(dummy_dem_lorenz):
+
+# Tests to check for crashes and do profiling
+def test_run_step_d(dummy_dem_lorenz):
     dem_state = dummy_dem_lorenz
     lr_dynamic = 0.01
     dem_step_d(dem_state, lr_dynamic)
+
+
+def test_run_dem(dummy_dem_lorenz):
+    dem_state = dummy_dem_lorenz
+    lr_dynamic = 0.1
+    lr_theta = 0.1
+    lr_lambda = 0.05
+    iter_lambda = 10
+    dem_step(dem_state, lr_dynamic=lr_dynamic, lr_theta=lr_theta, lr_lambda=lr_lambda, iter_lambda=iter_lambda)

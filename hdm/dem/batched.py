@@ -7,7 +7,6 @@ from copy import copy
 from typing import Callable, Iterable
 from itertools import repeat
 from time import time
-from tqdm import tqdm
 
 import torch
 
@@ -315,12 +314,12 @@ def dem_step_d(state: DEMState, lr):
     mu_v_tildes = [mu_v_tilde_t]
     for t, (y_tilde,
          sig_x_tilde, sig_v_tilde,
-         eta_v_tilde, p_v_tilde) in tqdm(enumerate(zip(
+         eta_v_tilde, p_v_tilde) in enumerate(zip(
                             state.input.y_tildes,
                             state.sig_x_tildes, state.sig_v_tildes,
                             state.input.eta_v_tildes,
                             state.input.p_v_tildes,
-                            strict=True))):
+                            strict=True)):
         def dynamic_free_energy(mu_x_tilde_t, mu_v_tilde_t):
             # free action as a function of dynamic terms
             # NOTE: We can't just use free_action_from_state(replace(state, ...))
@@ -389,3 +388,52 @@ def dem_step_precision(state: DEMState):
     state.sig_lambda = torch.linalg.inv(-u_lambda_dd)
     state.sig_x_tildes = torch.stack([-torch.linalg.inv(u_t_x_tilde_dd) for u_t_x_tilde_dd in u_t_x_tilde_dds])
     state.sig_v_tildes = torch.stack([-torch.linalg.inv(u_t_v_tilde_dd) for u_t_v_tilde_dd in u_t_v_tilde_dds])
+
+
+def dem_step_m(state: DEMState, lr_lambda, iter_lambda, min_improv):
+    """
+    Performs the noise hyperparameter update (step M) of DEM.
+    """
+    # FIXME: Do 'until convergence' rather than 'for some fixed number of steps'
+    last_f_bar = None
+    for i in range(iter_lambda):
+        def lambda_free_action(mu_lambda):
+            # free action as a function of lambda
+            return replace(state, mu_lambda=mu_lambda).free_action()
+        clear_gradients_on_state(state)
+        f_bar = free_action_from_state(state)
+        lambda_d = lr_lambda * torch.autograd.grad(f_bar, state.mu_lambda)[0]
+        lambda_dd = lr_lambda * torch.autograd.functional.hessian(lambda_free_action, state.mu_lambda)
+        step_matrix = (torch.matrix_exp(lambda_dd) - torch.eye(lambda_dd.shape[0])) @ torch.linalg.inv(lambda_dd)
+        state.mu_lambda = state.mu_lambda + step_matrix @ lambda_d
+        # convergence check
+        if last_f_bar is not None:
+            if last_f_bar + min_improv > f_bar:
+                break
+        last_f_bar = f_bar.clone().detach()
+
+
+def dem_step_e(state: DEMState, lr_theta):
+    """
+    Performs the parameter update (step E) of DEM.
+    """
+    # TODO: should be an if statement comparing new f_bar with old
+    def theta_free_action(mu_theta):
+        # free action as a function of theta
+        return replace(state, mu_theta=mu_theta).free_action()
+    clear_gradients_on_state(state)
+    f_bar = free_action_from_state(state)
+    theta_d = lr_theta * torch.autograd.grad(f_bar, state.mu_theta)[0]
+    theta_dd = lr_theta * torch.autograd.functional.hessian(theta_free_action, state.mu_theta)
+    step_matrix = (torch.matrix_exp(theta_dd) - torch.eye(theta_dd.shape[0])) @ torch.linalg.inv(theta_dd)
+    state.mu_theta = state.mu_theta + step_matrix @ theta_d
+
+
+def dem_step(state: DEMState, lr_dynamic, lr_theta, lr_lambda, iter_lambda, m_min_improv=0.01):
+    """
+    Does an iteration of DEM.
+    """
+    dem_step_d(state, lr_dynamic)
+    dem_step_m(state, lr_lambda, iter_lambda, min_improv=m_min_improv)
+    dem_step_e(state, lr_theta)
+    dem_step_precision(state)
