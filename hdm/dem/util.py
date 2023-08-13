@@ -1,4 +1,4 @@
-
+import torch
 
 def kron(A, B):
     """
@@ -48,3 +48,21 @@ def _fix_grad_shape_batch(tensor):
         return tensor[batch_selection,:,0,batch_selection,:,0]
     else:
         raise ValueError(f"Unexpected hessian shape: {tuple(tensor.shape)}")
+
+def generalized_batch_to_sequence(tensor, m, is2d=False):
+    if not is2d:
+        xs = torch.stack([x_tilde[:m].clone().detach() for x_tilde in tensor], axis=0)[:,:,0]
+    else:
+        xs = torch.stack([torch.diagonal(x_tilde)[:m].clone().detach() for x_tilde in tensor], axis=0)
+    return xs
+
+def extract_dynamic(state):
+    mu_xs = generalized_batch_to_sequence(state.mu_x_tildes, state.input.m_x)
+    sig_xs = generalized_batch_to_sequence(state.sig_x_tildes, state.input.m_x, is2d=True)
+    mu_vs = generalized_batch_to_sequence(state.mu_v_tildes, state.input.m_v)
+    sig_vs = generalized_batch_to_sequence(state.sig_v_tildes, state.input.m_v, is2d=True)
+    idx_first = int(state.input.p_comp // 2)
+    idx_last = idx_first + len(mu_xs)
+    ts_all = torch.arange(state.input.n) * state.input.dt
+    ts = ts_all[idx_first:idx_last]
+    return mu_xs, sig_xs, mu_vs, sig_vs, ts
