@@ -492,6 +492,8 @@ def dem_step_d(state: DEMState, lr, benchmark=False):
     mu_v_tilde_t = state.mu_v0_tilde.clone().detach()
     mu_x_tildes = [mu_x_tilde_t]
     mu_v_tildes = [mu_v_tilde_t]
+    deriv_mat_x = torch.from_numpy(deriv_mat(state.input.p, state.input.m_x)).to(dtype=torch.float32)
+    deriv_mat_v = torch.from_numpy(deriv_mat(state.input.p, state.input.m_v)).to(dtype=torch.float32)
     if benchmark:
         benchmark_t0 = time()
         benchmark_ts = []
@@ -538,12 +540,12 @@ def dem_step_d(state: DEMState, lr, benchmark=False):
         mu_v_tilde_t = mu_v_tilde_t.clone().detach().requires_grad_()
         f_eng = dynamic_free_energy(mu_x_tilde_t, mu_v_tilde_t)
         # NOTE: In the original pseudocode, x and v are in one vector
-        x_d = lr * torch.autograd.grad(f_eng, mu_x_tilde_t, retain_graph=True)[0]
-        v_d = lr * torch.autograd.grad(f_eng, mu_v_tilde_t)[0]
+        x_d = deriv_mat_x @ mu_x_tilde_t + lr * torch.autograd.grad(f_eng, mu_x_tilde_t, retain_graph=True)[0]
+        v_d = deriv_mat_v @ mu_v_tilde_t + lr * torch.autograd.grad(f_eng, mu_v_tilde_t)[0]
         x_dd = lr * torch.autograd.functional.hessian(lambda mu: dynamic_free_energy(mu, mu_v_tilde_t), mu_x_tilde_t)
         v_dd = lr * torch.autograd.functional.hessian(lambda mu: dynamic_free_energy(mu_x_tilde_t, mu), mu_v_tilde_t)
-        x_dd = _fix_grad_shape(x_dd)
-        v_dd = _fix_grad_shape(v_dd)
+        x_dd = deriv_mat_x + _fix_grad_shape(x_dd)
+        v_dd = deriv_mat_v + _fix_grad_shape(v_dd)
         step_matrix_x = (torch.matrix_exp(x_dd) - torch.eye(x_dd.shape[0])) @ torch.linalg.inv(x_dd)
         step_matrix_v = (torch.matrix_exp(v_dd) - torch.eye(v_dd.shape[0])) @ torch.linalg.inv(v_dd)
         mu_x_tilde_t = mu_x_tilde_t + step_matrix_x @ x_d
