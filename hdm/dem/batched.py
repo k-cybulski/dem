@@ -38,10 +38,10 @@ def generalized_func(func, mu_x_tildes, mu_v_tildes, m_x, m_v, p, params):
 
 def internal_energy_dynamic(
         g, f, mu_x_tildes, mu_v_tildes, y_tildes, m_x, m_v, p, mu_theta, eta_v_tildes, p_v_tildes,
-        mu_lambda, omega_w, omega_z, noise_autocorr_inv):
-    deriv_mat_x = torch.from_numpy(deriv_mat(p, m_x)).to(dtype=torch.float32)
+        mu_lambda, omega_w, omega_z, noise_autocorr_inv, diagnostic=False):
 
-    def _int_eng_dynamic(mu_x_tildes, mu_v_tildes, mu_theta, mu_lambda):
+    deriv_mat_x = torch.from_numpy(deriv_mat(p, m_x)).to(dtype=torch.float32)
+    def _int_eng_dynamic(mu_x_tildes, mu_v_tildes, mu_theta, mu_lambda, diagnostic=False):
         mu_theta = mu_theta
         mu_lambda = mu_lambda
         g_tildes = generalized_func(g, mu_x_tildes, mu_v_tildes, m_x, m_v, p, mu_theta)
@@ -65,9 +65,28 @@ def internal_energy_dynamic(
         u_t_x_ = -torch.bmm(err_x.mT, torch.matmul(prec_w_tilde, err_x)).reshape(n_batch) + torch.logdet(prec_w_tilde)
 
         u_t = (u_t_y_ + u_t_v_ + u_t_x_) / 2
-        return u_t
+        if diagnostic:
+            extr = {
+                'g_tildes': g_tildes,
+                'f_tildes': f_tildes,
+                'err_y': err_y,
+                'err_v': err_v,
+                'err_x': err_x,
+                'prec_z_tilde': prec_z_tilde,
+                'prec_w_tilde': prec_w_tilde,
+                'u_t_y_': u_t_y_,
+                'u_t_v_': u_t_v_,
+                'u_t_x_': u_t_x_
+            }
+            return u_t, extr
+        else:
+            return u_t
 
-    u_t = _int_eng_dynamic(mu_x_tildes, mu_v_tildes, mu_theta, mu_lambda)
+    out = _int_eng_dynamic(mu_x_tildes, mu_v_tildes, mu_theta, mu_lambda, diagnostic=diagnostic)
+    if diagnostic:
+        u_t, extr = out
+    else:
+        u_t = out
     # Note: Calling torch.autograd.functional.hessian four times is faster than
     # just doing it in one go
     u_t_x_tilde_dd = torch.autograd.functional.hessian(lambda mu: torch.sum(_int_eng_dynamic(mu, mu_v_tildes, mu_theta, mu_lambda)), mu_x_tildes, create_graph=True)
@@ -79,7 +98,10 @@ def internal_energy_dynamic(
     u_t_v_tilde_dd = _fix_grad_shape_batch(u_t_v_tilde_dd)
     u_t_theta_dd  = _fix_grad_shape(u_t_theta_dd)
     u_t_lambda_dd = _fix_grad_shape(u_t_lambda_dd)
-    return u_t, u_t_x_tilde_dd, u_t_v_tilde_dd, u_t_theta_dd, u_t_lambda_dd
+    if diagnostic:
+        return u_t, u_t_x_tilde_dd, u_t_v_tilde_dd, u_t_theta_dd, u_t_lambda_dd, extr
+    else:
+        return u_t, u_t_x_tilde_dd, u_t_v_tilde_dd, u_t_theta_dd, u_t_lambda_dd
 
 def internal_action(
         # for static internal energy
@@ -161,8 +183,12 @@ def free_action(
 
         # It's ok to skip the constant step if computing free action gradients
         # only on dynamic terms
-        skip_constant=False
+        skip_constant=False,
+
+        # Whether to return an extra dictionary of detailed information
+        diagnostic=False
         ):
+    extr = {}
     # Constant terms of free action
     if not skip_constant:
         u_c, u_c_theta_dd, u_c_lambda_dd = internal_energy_static(
@@ -174,14 +200,29 @@ def free_action(
             p_lambda,
             compute_dds=True
         )
-        f_c = u_c + (torch.logdet(sig_theta) + torch.logdet(sig_lambda)) / 2
+
+        sig_logdet_c = (torch.logdet(sig_theta) + torch.logdet(sig_lambda)) / 2
+        f_c = u_c + sig_logdet_c
+        if diagnostic:
+            extr_c = {
+                    'sig_logdet_c': sig_logdet_c,
+                    'u_c': u_c,
+                    'u_c_theta_dd': u_c_theta_dd,
+                    'u_c_lambda_dd': u_c_lambda_dd
+                    }
+            extr = {**extr, **extr_c}
     else:
         f_c = 0
 
     # Dynamic terms of free action that vary with time
-    u_t, u_t_x_tilde_dd, u_t_v_tilde_dd, u_t_theta_dd, u_t_lambda_dd = internal_energy_dynamic(
+    out = internal_energy_dynamic(
         g, f, mu_x_tildes, mu_v_tildes, y_tildes, m_x, m_v, p, mu_theta, eta_v_tildes, p_v_tildes,
-        mu_lambda, omega_w, omega_z, noise_autocorr_inv)
+        mu_lambda, omega_w, omega_z, noise_autocorr_inv, diagnostic=diagnostic)
+    if diagnostic:
+        u_t, u_t_x_tilde_dd, u_t_v_tilde_dd, u_t_theta_dd, u_t_lambda_dd, extr_dt = out
+        extr = {**extr, **extr_dt}
+    else:
+        u_t, u_t_x_tilde_dd, u_t_v_tilde_dd, u_t_theta_dd, u_t_lambda_dd = out
     w_x_tilde_sum_ = _batch_diag(torch.bmm(sig_x_tildes, u_t_x_tilde_dd)).sum()
     w_v_tilde_sum_ = _batch_diag(torch.bmm(sig_v_tildes, u_t_v_tilde_dd)).sum()
     # w_theta and w_lambda are sums already, because u_t_theta_dd is a sum
@@ -193,12 +234,32 @@ def free_action(
         w_theta_sum_ = torch.trace(sig_theta @ (u_t_theta_dd))
         w_lambda_sum_ = torch.trace(sig_lambda @ (u_t_lambda_dd))
 
+    sig_logdet_t = (torch.sum(torch.logdet(sig_x_tildes)) + torch.sum(torch.logdet(sig_v_tildes))) / 2 \
+
     f_tsum = torch.sum(u_t) \
-            + (torch.sum(torch.logdet(sig_x_tildes)) + torch.sum(torch.logdet(sig_v_tildes))) / 2 \
+            + sig_logdet_t \
             + (w_x_tilde_sum_ + w_v_tilde_sum_ + w_theta_sum_ + w_lambda_sum_) / 2
 
+    if diagnostic:
+        extr_t = {
+                'u_t': u_t,
+                'u_t_x_tilde_dd': u_t_x_tilde_dd,
+                'u_t_v_tilde_dd': u_t_v_tilde_dd,
+                'u_t_theta_dd': u_t_theta_dd,
+                'u_t_lambda_dd': u_t_lambda_dd,
+                'w_x_tilde_sum_': w_x_tilde_sum_,
+                'w_v_tilde_sum_': w_v_tilde_sum_,
+                'w_theta_sum_': w_theta_sum_,
+                'w_lambda_sum_': w_lambda_sum_,
+                'sig_logdet_t': sig_logdet_t
+                }
+        extr = {**extr, **extr_t}
+
     f_bar = f_c + f_tsum
-    return f_bar
+    if diagnostic:
+        return f_bar, extr
+    else:
+        return f_bar
 
 
 @dataclass
@@ -289,7 +350,7 @@ class DEMState:
     mu_x0_tilde: torch.Tensor
     mu_v0_tilde: torch.Tensor
 
-    def free_action(self, skip_constant=False):
+    def free_action(self, skip_constant=False, diagnostic=False):
         state = self
         return free_action(
             m_x=state.input.m_x,
@@ -315,7 +376,8 @@ class DEMState:
             omega_w=state.input.omega_w,
             omega_z=state.input.omega_z,
             noise_autocorr_inv=state.input.noise_autocorr_inv,
-            skip_constant=skip_constant
+            skip_constant=skip_constant,
+            diagnostic=diagnostic
         )
 
     def internal_action(self):
@@ -348,7 +410,7 @@ class DEMState:
                 noise_autocorr_inv=state.input.noise_autocorr_inv)
 
     @classmethod
-    def from_input(cls, input: DEMInput, x0: torch.Tensor, mu_theta: torch.Tensor=None):
+    def from_input(cls, input: DEMInput, x0: torch.Tensor,  mu_theta: torch.Tensor=None, **kwargs):
         x0 = x0.reshape(-1)
         assert len(x0) == input.m_x
 
@@ -363,9 +425,9 @@ class DEMState:
         sig_x_tildes = kron(input.noise_autocorr_inv, torch.eye(input.m_x)).repeat(len(mu_v_tildes), 1, 1)
 
         if mu_theta is None:
-            mu_theta=input.eta_theta.clone().detach(),
+            mu_theta=input.eta_theta.clone().detach()
 
-        return cls(
+        kwargs_default = dict(
                 input=input,
                 mu_x_tildes=mu_x0_tilde[None],
                 mu_v_tildes=mu_v_tildes,
@@ -376,7 +438,11 @@ class DEMState:
                 sig_theta=torch.linalg.inv(input.p_theta.clone().detach()),
                 sig_lambda=torch.linalg.inv(input.p_lambda.clone().detach()),
                 mu_x0_tilde=mu_x0_tilde,
-                mu_v0_tilde=mu_v_tildes[0])
+                mu_v0_tilde=mu_v_tildes[0]
+            )
+        kwargs = {**kwargs_default, **kwargs}
+
+        return cls(**kwargs)
 
 
 def dem_step_d(state: DEMState, lr):
