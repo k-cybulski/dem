@@ -282,20 +282,30 @@ class DEMState:
         )
 
     @classmethod
-    def from_input(cls, input: DEMInput, x0: torch.Tensor):
+    def from_input(cls, input: DEMInput, x0: torch.Tensor, mu_theta: torch.Tensor=None):
         x0 = x0.reshape(-1)
         assert len(x0) == input.m_x
 
         mu_x0_tilde = torch.concat([x0, torch.zeros(input.p * input.m_x)]).reshape((-1, 1))
         mu_v_tildes = torch.stack(list(iterate_generalized(input.eta_v, input.dt, input.p, p_comp=input.p_comp)))
 
+        # TODO: What is a good value here?
+        # this one shouldn't be *horrible*, but is very arbitrary
+        # sig_x_tildes = _autocorr_inv(input.p, input.dt * 3).repeat(len(mu_v_tildes), 1, 1)
+        # the noise autocorrelation structure given should be in some way
+        # approximately ok for the xs as well...
+        sig_x_tildes = kron(input.noise_autocorr_inv, torch.eye(input.m_x)).repeat(len(mu_v_tildes), 1, 1)
+
+        if mu_theta is None:
+            mu_theta=input.eta_theta.clone().detach(),
+
         return cls(
                 input=input,
                 mu_x_tildes=mu_x0_tilde[None],
                 mu_v_tildes=mu_v_tildes,
-                sig_x_tildes=torch.eye(x0.shape[0] * (input.p + 1)).repeat(len(mu_v_tildes), 1, 1), # TODO: What is a good value here?
+                sig_x_tildes=sig_x_tildes,
                 sig_v_tildes=torch.linalg.inv(input.p_v_tildes.clone().detach()),
-                mu_theta=input.eta_theta.clone().detach(),
+                mu_theta=mu_theta,
                 mu_lambda=input.eta_lambda.clone().detach(),
                 sig_theta=torch.linalg.inv(input.p_theta.clone().detach()),
                 sig_lambda=torch.linalg.inv(input.p_lambda.clone().detach()),
