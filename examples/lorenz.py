@@ -9,9 +9,9 @@ from matplotlib import pyplot as plt
 
 from hdm.core import len_generalized
 from hdm.noise import autocorr_friston, noise_cov_gen_theoretical
-from hdm.dummy import simulate_system
+from hdm.dummy import simulate_system, assert_system_func_equivalence
 from hdm.dem.batched import DEMInput, DEMState, dem_step_d, dem_step_precision
-from hdm.dem.naive import extract_dynamic
+from hdm.dem.util import extract_dynamic
 
 ## Prior expectations (and true values)
 params_true = np.array([18., 18., 46.92, 2., 1., 2., 4., 1., 1., 1.])
@@ -33,9 +33,10 @@ def f_true(x, v):
 def g_true(x, v):
     return obs(x, v, params_true)
 
+
 rng = np.random.default_rng(215)
 # n = 1024
-n = 500
+n = 30
 dt = 0.5
 vs = np.zeros((n, 1))
 w_sd = 1
@@ -89,16 +90,19 @@ def lorenz_torch_b(x, v, P):
     x0 = P[0] * x[:, 1] - P[1] * x[:,0]
     x1 = P[2] * x[:, 0] - P[3] * x[:,2] * x[:,0] - P[4] * x[:,1]
     x2 = P[5] * x[:, 0] * x[:,1] - P[6] * x[:,2]
-    return (torch.concat([x0, x1, x2]) / 128.).reshape((b_num, -1, 1))
+    return (torch.stack([x0, x1, x2], axis=1) / 128.).reshape((b_num, -1, 1))
 
 def obs_torch_b(x, v, P):
     b_num = x.shape[0]
-    x = x.reshape((b_num, -1))
-    return torch.matmul(x, P[-3:]).reshape((b_num, -1, 1))
+    return torch.matmul(P[-3:].reshape((1, -1)), x).reshape((b_num, -1, 1))
+
 
 m_x = 3
 m_v = 1
 m_y = 1
+
+assert_system_func_equivalence(lorenz, lorenz_torch_b, 3, 1, params_true)
+assert_system_func_equivalence(obs, obs_torch_b, 3, 1, params_true)
 
 dem_input = DEMInput(dt=dt, m_x=m_x, m_v=m_v, m_y=m_y, p=p, p_comp=p_comp,
                      ys=torch.tensor(ys, dtype=torch.float32),

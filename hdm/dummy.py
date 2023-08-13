@@ -2,8 +2,10 @@
 Various helper functions for testing.
 """
 
+import torch
 import numpy as np
 from scipy.integrate import solve_ivp
+
 from .noise import generate_noise_conv
 
 def sin_gen(p, t):
@@ -53,9 +55,11 @@ def wrap_with_innovations(ts, ws, vs):
             w = np.array(noises)
 
             vsin = []
+            if t > 5:
+                2 + 3
             for col in range(vs.shape[1]):
                 v_col = np.interp(t, ts, vs[:,col])
-                vsin.append(noise_col)
+                vsin.append(v_col)
             v = np.array(vsin)
             return func(x, v) + w
         return f
@@ -155,8 +159,8 @@ def simulate_colored_lti(A, B, C, D, x0, dt, vs,
     return simulate_system(f, g, x0, dt, vs, w_sd, z_sd, noise_temporal_sig, rng=rng)
 
 def dummy_lti(m_x, m_v, m_y, n, dt,
-              v_sd, v_temporal_sig,
-              w_sd, z_sd, noise_temporal_sig, rng):
+              x0, vs,
+              w_sd, z_sd, noise_temporal_sig, rng, v_sd=None, v_temporal_sig=None):
     """
     Generates and simulates a random LTI with colored noise. The inputs to the
     system are generated as a Gaussian process.
@@ -165,15 +169,37 @@ def dummy_lti(m_x, m_v, m_y, n, dt,
     B_shape = (m_x, m_v)
     C_shape = (m_y, m_x)
     D_shape = (m_y, m_v)
-    A = rng.normal(np.zeros(A_shape))
-    B = rng.normal(np.zeros(B_shape))
-    C = rng.normal(np.zeros(C_shape))
-    D = rng.normal(np.zeros(D_shape))
-    x0 = rng.normal(np.zeros(m_x))
-    vs = np.vstack([
-        generate_noise_conv(n, dt, v_sd ** 2, v_temporal_sig, rng=rng)
-        for _ in range(m_v)
-    ]).T
+    A = rng.normal(np.zeros(A_shape)) / (m_x * m_x)
+    B = rng.normal(np.zeros(B_shape)) / (m_x * m_v)
+    C = rng.normal(np.zeros(C_shape)) / (m_y * m_x)
+    D = rng.normal(np.zeros(D_shape)) / (m_y * m_v)
+    if x0 is None:
+        x0 = rng.normal(np.zeros(m_x))
+    if vs is None:
+        vs = np.vstack([
+            generate_noise_conv(n, dt, v_sd ** 2, v_temporal_sig, rng=rng)
+            for _ in range(m_v)
+        ]).T
     ts, xs, ys, ws, zs = simulate_colored_lti(A, B, C, D, x0, dt, vs,
                                               w_sd, z_sd, noise_temporal_sig, rng)
     return A, B, C, D, x0, ts, vs, xs, ys, ws, zs
+
+
+def assert_system_func_equivalence(func_ode, func_batch, m_x, m_v, params, seed=4):
+    """
+    Checks whether or not a numpy function appropriate for ODE solvers is
+    equivalent to a torch function applicable to batches.
+    """
+    rng = np.random.default_rng(seed)
+    bnum = 7
+    xs = rng.normal(np.zeros((bnum, m_x)))
+    vs = rng.normal(np.zeros((bnum, m_v)))
+    ys_gt = np.stack([func_ode(x, v, params) for x, v in zip(xs, vs)])
+    ys_gt_t = torch.tensor(ys_gt, dtype=torch.float32).reshape((bnum, -1, 1))
+
+    params_t = torch.tensor(params, dtype=torch.float32)
+    xs_t = torch.tensor(xs, dtype=torch.float32).reshape((bnum, m_x, 1))
+    vs_t = torch.tensor(vs, dtype=torch.float32).reshape((bnum, m_v, 1))
+    ys_t = func_batch(xs_t, vs_t, params_t)
+
+    assert torch.isclose(ys_gt_t, ys_t).all()
