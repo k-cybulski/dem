@@ -10,7 +10,8 @@ from matplotlib import pyplot as plt
 from hdm.core import len_generalized
 from hdm.noise import autocorr_friston, noise_cov_gen_theoretical
 from hdm.dummy import simulate_system
-from hdm.dem.naive import DEMInput, DEMState, dem_step_d, extract_dynamic
+from hdm.dem.batched import DEMInput, DEMState, dem_step_d, dem_step_precision
+from hdm.dem.naive import extract_dynamic
 
 ## Prior expectations (and true values)
 params_true = np.array([18., 18., 46.92, 2., 1., 2., 4., 1., 1., 1.])
@@ -33,8 +34,9 @@ def g_true(x, v):
     return obs(x, v, params_true)
 
 rng = np.random.default_rng(215)
-n = 1024
-dt = 1.
+# n = 1024
+n = 500
+dt = 0.5
 vs = np.zeros((n, 1))
 w_sd = 1
 z_sd = 1
@@ -50,7 +52,7 @@ p = 4
 p_comp = p
 
 x0_test = np.array([12,13,16])
-p_v = torch.tensor(np.exp(64).reshape((1, 1)), dtype=torch.float32)
+p_v = torch.tensor(np.exp(5).reshape((1, 1)), dtype=torch.float32)
 
 # doesn't matter, v is 0 anyway
 v_temporal_sig = 5
@@ -61,10 +63,11 @@ noise_autocorr = torch.tensor(noise_cov_gen_theoretical(p, sig=noise_temporal_si
 noise_autocorr_inv_ = torch.linalg.inv(noise_autocorr)
 
 eta_theta = torch.tensor(params_true, dtype=torch.float32)
-p_theta = torch.tensor(np.diag(np.ones(eta_theta.shape)) * np.exp(64), dtype=torch.float32)
+p_theta = torch.tensor(np.diag(np.ones(eta_theta.shape)) * np.exp(5), dtype=torch.float32)
 eta_lambda = torch.zeros(2) # Not sure how to initialize these well
 p_lambda = torch.eye(2) # Not sure how to initialize these well
 
+mu_x0 = torch.tensor(x0_test, dtype=torch.float32)
 mu_x0_tilde = torch.tensor(np.concatenate((x0_test, rng.normal([0] * 3 * p))), dtype=torch.float32).reshape((-1, 1))
 mu_v0_tilde = torch.tensor(np.zeros((p + 1, 1)), dtype=torch.float32)
 
@@ -80,7 +83,24 @@ def obs_torch(x, v, P):
     x = x.reshape(-1)
     return (x @ P[-3:]).reshape((-1, 1))
 
-dem_input = DEMInput(dt=dt, m_x=3, m_v=1, m_y=1, p=p, p_comp=p_comp,
+def lorenz_torch_b(x, v, P):
+    b_num = x.shape[0]
+    x = x.reshape((b_num, -1))
+    x0 = P[0] * x[:, 1] - P[1] * x[:,0]
+    x1 = P[2] * x[:, 0] - P[3] * x[:,2] * x[:,0] - P[4] * x[:,1]
+    x2 = P[5] * x[:, 0] * x[:,1] - P[6] * x[:,2]
+    return (torch.concat([x0, x1, x2]) / 128.).reshape((b_num, -1, 1))
+
+def obs_torch_b(x, v, P):
+    b_num = x.shape[0]
+    x = x.reshape((b_num, -1))
+    return torch.matmul(x, P[-3:]).reshape((b_num, -1, 1))
+
+m_x = 3
+m_v = 1
+m_y = 1
+
+dem_input = DEMInput(dt=dt, m_x=m_x, m_v=m_v, m_y=m_y, p=p, p_comp=p_comp,
                      ys=torch.tensor(ys, dtype=torch.float32),
                      eta_v=torch.tensor(vs, dtype=torch.float32),
                      p_v=p_v,
@@ -89,23 +109,47 @@ dem_input = DEMInput(dt=dt, m_x=3, m_v=1, m_y=1, p=p, p_comp=p_comp,
                      p_theta=p_theta,
                      eta_lambda=eta_lambda,
                      p_lambda=p_lambda,
-                     f=lorenz_torch,
-                     g=obs_torch,
-                     noise_autocorr_inv=noise_autocorr_inv_)
+                     f=lorenz_torch_b,
+                     g=obs_torch_b,
+                     noise_autocorr_inv=noise_autocorr_inv_,
+                     omega_w=torch.eye(m_x),
+                     omega_z=torch.eye(m_y))
 
-dem_state = DEMState(input=dem_input,
-                     mu_x_tildes=None,
-                     mu_v_tildes=None,
-                     sig_x_tildes=[torch.eye(3 * (p + 1)) for _ in range(len_generalized(n, p_comp))],
-                     sig_v_tildes=[torch.eye(1 * (p + 1)) for _ in range(len_generalized(n, p_comp))],
-                     mu_theta=eta_theta,
-                     mu_lambda=eta_lambda,
-                     sig_theta=torch.linalg.inv(p_theta),
-                     sig_lambda=torch.linalg.inv(p_lambda),
-                     mu_x0_tilde=mu_x0_tilde,
-                     mu_v0_tilde=mu_v0_tilde)
+# dem_state = DEMState(input=dem_input,
+#                      mu_x_tildes=None,
+#                      mu_v_tildes=None,
+#                      sig_x_tildes=[torch.eye(3 * (p + 1)) for _ in range(len_generalized(n, p_comp))],
+#                      sig_v_tildes=[torch.eye(1 * (p + 1)) for _ in range(len_generalized(n, p_comp))],
+#                      mu_theta=eta_theta,
+#                      mu_lambda=eta_lambda,
+#                      sig_theta=torch.linalg.inv(p_theta),
+#                      sig_lambda=torch.linalg.inv(p_lambda),
+#                      mu_x0_tilde=mu_x0_tilde,
+#                      mu_v0_tilde=mu_v0_tilde)
+dem_state = DEMState.from_input(dem_input, mu_x0)
 
 lr_dynamic = 1
 dem_step_d(dem_state, lr_dynamic)
+mu_xs1, sig_xs1, mu_vs1, ts1 = extract_dynamic(dem_state)
 
-mu_xs, sig_xs, mu_vs, idx_first, idx_last = extract_dynamic(dem_state)
+plt.plot(ts, xs[:, 0], label='Target 1')
+plt.plot(ts1, mu_xs1[:, 0], label='Model 1')
+plt.plot(ts, xs[:, 1], label='Target 2')
+plt.plot(ts1, mu_xs1[:, 1], label='Model 2')
+plt.plot(ts, xs[:, 2], label='Target 3')
+plt.plot(ts1, mu_xs1[:, 2], label='Model 3')
+plt.legend()
+plt.show()
+
+dem_step_precision(dem_state)
+dem_step_d(dem_state, lr_dynamic)
+mu_xs2, sig_xs2, mu_vs2, ts2 = extract_dynamic(dem_state)
+
+plt.plot(ts, xs[:, 0], label='Target 1')
+plt.plot(ts2, mu_xs2[:, 0], label='Model 1')
+plt.plot(ts, xs[:, 1], label='Target 2')
+plt.plot(ts2, mu_xs2[:, 1], label='Model 2')
+plt.plot(ts, xs[:, 2], label='Target 3')
+plt.plot(ts2, mu_xs2[:, 2], label='Model 3')
+plt.legend()
+plt.show()
