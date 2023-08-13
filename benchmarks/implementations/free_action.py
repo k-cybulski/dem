@@ -154,3 +154,87 @@ def free_action_batched(
 
     f_bar = f_c + f_tsum
     return f_bar
+
+
+def free_action_batched_options(
+        # how many terms are there in mu_x and mu_v?
+        m_x, m_v,
+
+        # how many derivatives are we tracking in generalised vectors?
+        p,
+
+        # dynamic terms
+        mu_x_tildes, mu_v_tildes, # iterator of state and input mean estimates in generalized coordinates
+        sig_x_tildes, sig_v_tildes, # as above but for covariance estimates
+        y_tildes, # iterator of outputs in generalized coordinates
+        eta_v_tildes, p_v_tildes, # iterator of input mean priors
+
+        # prior means and precisions
+        eta_theta,
+        eta_lambda,
+        p_theta,
+        p_lambda,
+
+        # parameter estimate means and covariances
+        mu_theta,
+        mu_lambda,
+        sig_theta,
+        sig_lambda,
+
+        # functions
+        g, # output function
+        f, # state transition function
+
+        # noise precision matrices (to be scaled by hyperparameters)
+        omega_w,
+        omega_z,
+
+        # generalized noise temporal autocorrelation inverse (precision)
+        noise_autocorr_inv,
+
+        # Whether to skip parts of the computations, since they might be irrelevant for e.g. gradients
+        skip_constant=False,
+        skip_w_lambda=False
+        ):
+    f_sum = 0
+    # Constant terms of free action
+    if not skip_constant:
+        u_c, u_c_theta_dd, u_c_lambda_dd = internal_energy_static(
+            mu_theta,
+            mu_lambda,
+            eta_theta,
+            eta_lambda,
+            p_theta,
+            p_lambda,
+            compute_dds=True
+        )
+        f_c = u_c + (torch.logdet(sig_theta) + torch.logdet(sig_lambda)) / 2
+    else:
+        f_c = 0
+
+    # Dynamic terms of free action that vary with time
+    u_t, u_t_x_tilde_dd, u_t_v_tilde_dd, u_t_theta_dd, u_t_lambda_dd = internal_energy_dynamic_batched_manyhess(
+        g, f, mu_x_tildes, mu_v_tildes, y_tildes, m_x, m_v, p, mu_theta, eta_v_tildes, p_v_tildes,
+        mu_lambda, omega_w, omega_z, noise_autocorr_inv)
+    w_x_tilde_sum_ = _batch_diag(torch.bmm(sig_x_tildes, u_t_x_tilde_dd)).sum()
+    w_v_tilde_sum_ = _batch_diag(torch.bmm(sig_v_tildes, u_t_v_tilde_dd)).sum()
+    # w_theta and w_lambda are sums already, because u_t_theta_dd is a sum
+    # because of how the batch Hessian is computed
+    if not skip_constant:
+        w_theta_sum_ = torch.trace(sig_theta @ (u_c_theta_dd + u_t_theta_dd))
+    else:
+        w_theta_sum_ = torch.trace(sig_theta @ (u_t_theta_dd))
+
+    if not (skip_w_lambda or skip_constant):
+        w_lambda_sum_ = torch.trace(sig_lambda @ (u_c_lambda_dd + u_t_lambda_dd))
+    elif skip_constant:
+        w_lambda_sum_ = torch.trace(sig_lambda @ (u_t_lambda_dd))
+    else:
+        w_lambda_sum_ = 0
+
+    f_tsum = torch.sum(u_t) \
+            + (torch.sum(torch.logdet(sig_x_tildes)) + torch.sum(torch.logdet(sig_v_tildes))) / 2 \
+            + (w_x_tilde_sum_ + w_v_tilde_sum_ + w_theta_sum_ + w_lambda_sum_) / 2
+
+    f_bar = f_c + f_tsum
+    return f_bar

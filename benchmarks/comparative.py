@@ -23,6 +23,8 @@ from benchmarks.implementations.internal_energy import (
         internal_energy_dynamic_onehess,
         internal_energy_dynamic_batched,
         internal_energy_dynamic_batched_manyhess)
+from benchmarks.implementations.free_action import (free_action_naive, free_action_batched,
+                                                    free_action_batched_options)
 
 ##
 ## Helper functions
@@ -62,7 +64,7 @@ def dummy_dem_simple(n, rng=None):
     # Define a DEM model
     def dem_f(x, v, params):
         params = params.reshape((2,2))
-        return params @ x
+        return torch.matmul(params, x)
 
     def dem_g(x, v, params):
         return x
@@ -656,6 +658,98 @@ def test_free_action_speed():
     plt.legend()
     plt.show()
 
+##
+## Skipping computations of terms in free action
+##
+### Some terms have zero gradient w.r.t. update steps, so they can be discarded
+### during computation
+
+def test_skipping_terms():
+    n = 30
+    rng = np.random.default_rng(25)
+    dem_state = dummy_dem_simple(n, rng=rng)
+
+    y_tildes_n = list(dem_state.input.iter_y_tildes())
+    eta_v_tildes_n = list(dem_state.input.iter_eta_v_tildes())
+    p_v_tildes_n = list(dem_state.input.iter_p_v_tildes())
+    mu_x_tildes_n = dem_state.mu_x_tildes
+    mu_v_tildes_n = dem_state.mu_v_tildes
+    omega_w = dem_state.input.omega_w
+    omega_z = dem_state.input.omega_z
+    m_x = dem_state.input.m_x
+    m_v = dem_state.input.m_v
+    p = dem_state.input.p
+    mu_theta = dem_state.mu_theta
+    mu_lambda = dem_state.mu_lambda
+
+    y_tildes_b, eta_v_tildes_b, p_v_tildes_b, mu_x_tildes_b, mu_v_tildes_b = [
+            torch.stack(ls) for ls in
+            [y_tildes_n, eta_v_tildes_n, p_v_tildes_n, mu_x_tildes_n, mu_v_tildes_n]]
+    sig_x_tildes_b = torch.stack(dem_state.sig_x_tildes)
+    sig_v_tildes_b = torch.stack(dem_state.sig_v_tildes)
+
+    def dynamic_free_energy(mu_x_tildes, mu_v_tildes, skip_constant, skip_w_lambda):
+        # Free action as a function of dynamic terms, used to find gradients
+        return free_action_batched_options(
+            m_x=dem_state.input.m_x,
+            m_v=dem_state.input.m_v,
+            p=dem_state.input.p,
+            mu_x_tildes=mu_x_tildes,
+            mu_v_tildes=mu_v_tildes,
+            sig_x_tildes=sig_x_tildes_b,
+            sig_v_tildes=sig_v_tildes_b,
+            y_tildes=y_tildes_b,
+            eta_v_tildes=eta_v_tildes_b,
+            p_v_tildes=p_v_tildes_b,
+            eta_theta=dem_state.input.eta_theta,
+            eta_lambda=dem_state.input.eta_lambda,
+            p_theta=dem_state.input.p_theta,
+            p_lambda=dem_state.input.p_lambda,
+            mu_theta=dem_state.mu_theta,
+            mu_lambda=dem_state.mu_lambda,
+            sig_theta=dem_state.sig_theta,
+            sig_lambda=dem_state.sig_lambda,
+            g=dem_state.input.g,
+            f=dem_state.input.f,
+            omega_w=dem_state.input.omega_w,
+            omega_z=dem_state.input.omega_z,
+            noise_autocorr_inv=dem_state.input.noise_autocorr_inv,
+            skip_constant=skip_constant,
+            skip_w_lambda=skip_w_lambda)
+
+    # Compute baselines
+    mu_x_tildes = mu_x_tildes_b.clone().detach().requires_grad_()
+    mu_v_tildes = mu_v_tildes_b.clone().detach().requires_grad_()
+    f_eng = dynamic_free_energy(mu_x_tildes, mu_v_tildes, skip_constant=False, skip_w_lambda=False)
+    x_d_gt = torch.autograd.grad(f_eng, mu_x_tildes, retain_graph=True)[0]
+    v_d_gt = torch.autograd.grad(f_eng, mu_v_tildes)[0]
+    x_dd_gt = torch.autograd.functional.hessian(lambda mu: dynamic_free_energy(mu, mu_v_tildes, skip_constant=False, skip_w_lambda=False), mu_x_tildes)
+    v_dd_gt = torch.autograd.functional.hessian(lambda mu: dynamic_free_energy(mu_x_tildes, mu, skip_constant=False, skip_w_lambda=False), mu_v_tildes)
+
+    # Now compare to cases with skipping...
+    mu_x_tildes = mu_x_tildes_b.clone().detach().requires_grad_()
+    mu_v_tildes = mu_v_tildes_b.clone().detach().requires_grad_()
+    f_eng = dynamic_free_energy(mu_x_tildes, mu_v_tildes, skip_constant=True, skip_w_lambda=False)
+    x_d_sc = torch.autograd.grad(f_eng, mu_x_tildes, retain_graph=True)[0]
+    v_d_sc = torch.autograd.grad(f_eng, mu_v_tildes)[0]
+    x_dd_sc = torch.autograd.functional.hessian(lambda mu: dynamic_free_energy(mu, mu_v_tildes, skip_constant=True, skip_w_lambda=False), mu_x_tildes)
+    v_dd_sc = torch.autograd.functional.hessian(lambda mu: dynamic_free_energy(mu_x_tildes, mu, skip_constant=True, skip_w_lambda=False), mu_v_tildes)
+    print(f"dist(x_d_gt, x_d_sc) = {(x_d_gt - x_d_sc).norm()}")
+    print(f"dist(x_dd_gt, x_dd_sc) = {(x_dd_gt - x_dd_sc).norm()}")
+
+    mu_x_tildes = mu_x_tildes_b.clone().detach().requires_grad_()
+    mu_v_tildes = mu_v_tildes_b.clone().detach().requires_grad_()
+    f_eng = dynamic_free_energy(mu_x_tildes, mu_v_tildes, skip_constant=False, skip_w_lambda=True)
+    x_d_sl = torch.autograd.grad(f_eng, mu_x_tildes, retain_graph=True)[0]
+    v_d_sl = torch.autograd.grad(f_eng, mu_v_tildes)[0]
+    x_dd_sl = torch.autograd.functional.hessian(lambda mu: dynamic_free_energy(mu, mu_v_tildes, skip_constant=False, skip_w_lambda=True), mu_x_tildes)
+    v_dd_sl = torch.autograd.functional.hessian(lambda mu: dynamic_free_energy(mu_x_tildes, mu, skip_constant=False, skip_w_lambda=True), mu_v_tildes)
+    # Following section 11.1 of Anil Meera & Wisse, we hope these are zero
+    # but alas they are not. They use an extra assumption of
+    # \tilde{\Pi}_{\lambda\lambda} = 0
+    # In any case, these values are low.
+    print(f"dist(x_d_gt, x_d_sl) = {(x_d_gt - x_d_sl).norm()}")
+    print(f"dist(x_dd_gt, x_dd_sl) = {(x_dd_gt - x_dd_sl).norm()}")
 
 
 if __name__ == '__main__':

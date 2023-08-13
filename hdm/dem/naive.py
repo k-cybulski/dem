@@ -17,21 +17,9 @@ import torch
 
 from ..core import deriv_mat, iterate_generalized
 from ..noise import generate_noise_conv, autocorr_friston, noise_cov_gen_theoretical
+from .util import kron, _fix_grad_shape
 
 # Part 1: Implementation of optimization targets
-
-def kron(A, B):
-    """
-    Kronecker product for matrices.
-
-    This is a replacement for Torch's `torch.kron`, which is broken and crashes
-    when called on an inverted matrix, similar to here:
-        https://github.com/pytorch/pytorch/issues/54135
-
-    Taken from Anton Obukhov's comment on GitHub:
-        https://github.com/pytorch/pytorch/issues/74442#issuecomment-1111468515
-    """
-    return (A[:, None, :, None] * B[None, :, None, :]).reshape(A.shape[0] * B.shape[0], A.shape[1] * B.shape[1])
 
 def _fix_grad_shape(tensor):
     """
@@ -175,10 +163,20 @@ def internal_energy_dynamic(
     # horribly inefficient way to go about this, but hey, at least it may work...
     # (so many unnecessary repeated computations)
 
-    # FIXME OPT: Optimize the code below. Don't run
-    # torch.autograd.functional.hessian four times separately? Running it once
-    # should allow for all the necessary outputs. But it might unnecessarily
-    # compute Hessians _between_ the parameters, which might be slower?
+    # Note that it is actually quicker to compute these hessians by four
+    # separate function calls, than by a single overarching call to
+    # torch.autograd.functional.hessian. I benchmarked the implementation below to compare:
+    #
+    #   dds = torch.autograd.functional.hessian(
+    #           lambda mu_x_tilde, mu_v_tilde, mu_theta, mu_lambda: _int_eng_dynamic(
+    #               mu_x_tilde, mu_v_tilde, mu_theta, mu_lambda),
+    #           (mu_x_tilde, mu_v_tilde, mu_theta, mu_lambda),
+    #           create_graph=True)
+    #   u_t_x_tilde_dd = dds[0][0]
+    #   u_t_v_tilde_dd = dds[1][1]
+    #   u_t_theta_dd = dds[2][2]
+    #   u_t_lambda_dd = dds[3][3]
+
     if compute_dds:
         u_t_x_tilde_dd = torch.autograd.functional.hessian(lambda mu: _int_eng_dynamic(mu, mu_v_tilde, mu_theta, mu_lambda), mu_x_tilde, create_graph=True)
         u_t_v_tilde_dd = torch.autograd.functional.hessian(lambda mu: _int_eng_dynamic(mu_x_tilde, mu, mu_theta, mu_lambda), mu_v_tilde, create_graph=True)
