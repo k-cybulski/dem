@@ -22,7 +22,10 @@ from benchmarks.implementations.internal_energy import (
         internal_energy_dynamic_naive,
         internal_energy_dynamic_onehess,
         internal_energy_dynamic_batched,
-        internal_energy_dynamic_batched_manyhess)
+        internal_energy_dynamic_batched_manyhess,
+        internal_energy_dynamic_batched_customhess,
+        internal_energy_dynamic_batched_customhess_nocrossbatch,
+        )
 from benchmarks.implementations.free_action import (free_action_naive, free_action_batched,
                                                     free_action_batched_options)
 
@@ -326,7 +329,36 @@ def test_internal_energy_dynamic_correctness():
             dem_state.input.omega_z,
             dem_state.input.noise_autocorr_inv)
 
+    out_batched_customhess = internal_energy_dynamic_batched_customhess(
+            dem_state.input.g,
+            dem_state.input.f,
+            mu_x_tildes_b, mu_v_tildes_b, y_tildes_b, m_x, m_v, p,
+            dem_state.mu_theta,
+            eta_v_tildes_b,
+            p_v_tildes_b,
+            dem_state.mu_lambda,
+            dem_state.input.omega_w,
+            dem_state.input.omega_z,
+            dem_state.input.noise_autocorr_inv)
+
+    out_batched_customhess_nocrossbatch = internal_energy_dynamic_batched_customhess_nocrossbatch(
+            dem_state.input.g,
+            dem_state.input.f,
+            mu_x_tildes_b, mu_v_tildes_b, y_tildes_b, m_x, m_v, p,
+            dem_state.mu_theta,
+            eta_v_tildes_b,
+            p_v_tildes_b,
+            dem_state.mu_lambda,
+            dem_state.input.omega_w,
+            dem_state.input.omega_z,
+            dem_state.input.noise_autocorr_inv)
+
     assert all(torch.isclose(t1, t2).all() for t1, t2 in zip(out_batched, out_batched_manyhess))
+    # The two methods below output the sum for u_t, rather than the timeseries
+    assert torch.isclose(torch.sum(out_batched[0]), out_batched_customhess[0])
+    assert all(torch.isclose(t1, t2).all() for t1, t2 in zip(out_batched[1:], out_batched_customhess[1:]))
+    assert torch.isclose(torch.sum(out_batched[0]), out_batched_customhess_nocrossbatch[0])
+    assert all(torch.isclose(t1, t2).all() for t1, t2 in zip(out_batched[1:], out_batched_customhess_nocrossbatch[1:]))
 
     # need to do an awkward transpose
     out_naive_listed = list(zip(*out_naive))
@@ -346,7 +378,7 @@ def test_internal_energy_dynamic_correctness():
 
 
 def test_internal_energy_dynamic_speed():
-    ns = [10, 25, 50, 100, 250, 500, 1000]
+    ns = [10, 25, 50, 100]
     nrun = 20
 
     times = []
@@ -359,7 +391,9 @@ def test_internal_energy_dynamic_speed():
             't_naive': [],
             't_onehess': [],
             't_batched': [],
-            't_batched_manyhess': []
+            't_batched_manyhess': [],
+            't_batched_customhess': [],
+            't_batched_customhess_nocrossbatch': [],
         })
 
     table_rows = [{}] * len(times)
@@ -449,11 +483,37 @@ def test_internal_energy_dynamic_speed():
                     dem_state.input.omega_z,
                     dem_state.input.noise_autocorr_inv), number=nrun)
             times[idx]['t_batched_manyhess'].append(t_batched_manyhess)
+            t_batched_customhess = timeit.timeit(lambda :internal_energy_dynamic_batched_customhess(
+                    dem_state.input.g,
+                    dem_state.input.f,
+                    mu_x_tildes_b, mu_v_tildes_b, y_tildes_b, m_x, m_v, p,
+                    dem_state.mu_theta,
+                    eta_v_tildes_b,
+                    p_v_tildes_b,
+                    dem_state.mu_lambda,
+                    dem_state.input.omega_w,
+                    dem_state.input.omega_z,
+                    dem_state.input.noise_autocorr_inv), number=nrun)
+            times[idx]['t_batched_customhess'].append(t_batched_customhess)
+            t_batched_customhess_nocrossbatch = timeit.timeit(lambda :internal_energy_dynamic_batched_customhess_nocrossbatch(
+                    dem_state.input.g,
+                    dem_state.input.f,
+                    mu_x_tildes_b, mu_v_tildes_b, y_tildes_b, m_x, m_v, p,
+                    dem_state.mu_theta,
+                    eta_v_tildes_b,
+                    p_v_tildes_b,
+                    dem_state.mu_lambda,
+                    dem_state.input.omega_w,
+                    dem_state.input.omega_z,
+                    dem_state.input.noise_autocorr_inv), number=nrun)
+            times[idx]['t_batched_customhess_nocrossbatch'].append(t_batched_customhess_nocrossbatch)
             table_rows[idx] = {
                 'n': n,
                 't_manyhess': np.mean(times[idx]['t_naive']),
                 't_onehess': np.mean(times[idx]['t_onehess']),
                 't_batched_manyhess': np.mean(times[idx]['t_batched_manyhess']),
+                't_batched_customhess': np.mean(times[idx]['t_batched_customhess']),
+                't_batched_customhess_nocrossbatch': np.mean(times[idx]['t_batched_customhess_nocrossbatch']),
                 't_batched_onehess ': np.mean(times[idx]['t_batched']),
                 'as of': run_num + 1,
                 }
