@@ -401,7 +401,7 @@ def dem_step_m(state: DEMState, lr_lambda, iter_lambda, min_improv):
             # free action as a function of lambda
             return replace(state, mu_lambda=mu_lambda).free_action()
         clear_gradients_on_state(state)
-        f_bar = free_action_from_state(state)
+        f_bar = state.free_action()
         lambda_d = lr_lambda * torch.autograd.grad(f_bar, state.mu_lambda)[0]
         lambda_dd = lr_lambda * torch.autograd.functional.hessian(lambda_free_action, state.mu_lambda)
         step_matrix = (torch.matrix_exp(lambda_dd) - torch.eye(lambda_dd.shape[0])) @ torch.linalg.inv(lambda_dd)
@@ -422,7 +422,7 @@ def dem_step_e(state: DEMState, lr_theta):
         # free action as a function of theta
         return replace(state, mu_theta=mu_theta).free_action()
     clear_gradients_on_state(state)
-    f_bar = free_action_from_state(state)
+    f_bar = state.free_action()
     theta_d = lr_theta * torch.autograd.grad(f_bar, state.mu_theta)[0]
     theta_dd = lr_theta * torch.autograd.functional.hessian(theta_free_action, state.mu_theta)
     step_matrix = (torch.matrix_exp(theta_dd) - torch.eye(theta_dd.shape[0])) @ torch.linalg.inv(theta_dd)
