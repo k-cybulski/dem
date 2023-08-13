@@ -351,6 +351,7 @@ def dem_step_d(state: DEMState, lr):
                 omega_z=state.input.omega_z,
                 noise_autocorr_inv=state.input.noise_autocorr_inv,
                 skip_constant=True)
+        # note that until the procedure is finished, these are a list and not a tensor
         state.mu_x_tildes = mu_x_tildes
         state.mu_v_tildes = mu_v_tildes
         # free action on just a single timestep
@@ -374,8 +375,8 @@ def dem_step_d(state: DEMState, lr):
         mu_v_tildes.append(mu_v_tilde_t)
     mu_x_tildes = mu_x_tildes[:-1] # there is one too many
     mu_v_tildes = mu_v_tildes[:-1]
-    state.mu_x_tildes = mu_x_tildes
-    state.mu_v_tildes = mu_v_tildes
+    state.mu_x_tildes = torch.stack(mu_x_tildes)
+    state.mu_v_tildes = torch.stack(mu_v_tildes)
 
 
 def dem_step_precision(state: DEMState):
