@@ -81,6 +81,43 @@ def internal_energy_dynamic(
     u_t_lambda_dd = _fix_grad_shape(u_t_lambda_dd)
     return u_t, u_t_x_tilde_dd, u_t_v_tilde_dd, u_t_theta_dd, u_t_lambda_dd
 
+def internal_action(
+        # for static internal energy
+        mu_theta,
+        mu_lambda,
+        eta_theta,
+        eta_lambda,
+        p_theta,
+        p_lambda,
+
+        # for dynamic internal energies
+        g, f,
+        m_x, m_v, p,
+
+        mu_x_tildes, mu_v_tildes,
+        sig_x_tildes, sig_v_tildes,
+        y_tildes,
+        eta_v_tildes, p_v_tildes,
+        omega_w, omega_z, noise_autocorr_inv
+        ):
+    """
+    Computes internal energy/action, and hessians. Used to update precisions at the end of a
+    DEM iteration.
+    """
+    u, u_theta_dd, u_lambda_dd = internal_energy_static(
+        mu_theta,
+        mu_lambda,
+        eta_theta,
+        eta_lambda,
+        p_theta,
+        p_lambda
+    )
+    u_t, u_t_x_tilde_dds, u_t_v_tilde_dds, u_t_theta_dd, u_t_lambda_dd = internal_energy_dynamic(
+        g, f, mu_x_tildes, mu_v_tildes, y_tildes, m_x, m_v, p, mu_theta, eta_v_tildes, p_v_tildes,
+        mu_lambda, omega_w, omega_z, noise_autocorr_inv)
+    u += torch.sum(u_t)
+    return u, u_theta_dd, u_lambda_dd, u_t_x_tilde_dds, u_t_v_tilde_dds
+
 def _batch_diag(tensor):
     # As mentioned here:
     # https://discuss.pytorch.org/t/get-the-trace-for-a-batch-of-matrices/108504/2
@@ -281,6 +318,35 @@ class DEMState:
             skip_constant=skip_constant
         )
 
+    def internal_action(self):
+        state = self
+        return internal_action(
+                # for static internal energy
+                mu_theta=state.mu_theta,
+                mu_lambda=state.mu_lambda,
+                eta_theta=state.input.eta_theta,
+                eta_lambda=state.input.eta_lambda,
+                p_theta=state.input.p_theta,
+                p_lambda=state.input.p_lambda,
+
+                # for dynamic internal energies
+                g=state.input.g,
+                f=state.input.f,
+                m_x=state.input.m_x,
+                m_v=state.input.m_v,
+                p=state.input.p,
+
+                mu_x_tildes=state.mu_x_tildes,
+                mu_v_tildes=state.mu_v_tildes,
+                sig_x_tildes=state.sig_x_tildes,
+                sig_v_tildes=state.sig_v_tildes,
+                y_tildes=state.input.y_tildes,
+                eta_v_tildes=state.input.eta_v_tildes,
+                p_v_tildes=state.input.p_v_tildes,
+                omega_w=state.input.omega_w,
+                omega_z=state.input.omega_z,
+                noise_autocorr_inv=state.input.noise_autocorr_inv)
+
     @classmethod
     def from_input(cls, input: DEMInput, x0: torch.Tensor, mu_theta: torch.Tensor=None):
         x0 = x0.reshape(-1)
@@ -394,7 +460,7 @@ def dem_step_precision(state: DEMState):
     Does a precision update of DEM.
     """
     clear_gradients_on_state(state)
-    u, u_theta_dd, u_lambda_dd, u_t_x_tilde_dds, u_t_v_tilde_dds = internal_action_from_state(state)
+    u, u_theta_dd, u_lambda_dd, u_t_x_tilde_dds, u_t_v_tilde_dds = state.internal_action()
     state.sig_theta = torch.linalg.inv(-u_theta_dd)
     state.sig_lambda = torch.linalg.inv(-u_lambda_dd)
     state.sig_x_tildes = torch.stack([-torch.linalg.inv(u_t_x_tilde_dd) for u_t_x_tilde_dd in u_t_x_tilde_dds])
