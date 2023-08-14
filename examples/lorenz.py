@@ -94,7 +94,6 @@ m_y = 1
 assert_system_func_equivalence(lorenz, lorenz_torch_b, 3, 1, params_true)
 assert_system_func_equivalence(obs, obs_torch_b, 3, 1, params_true)
 
-
 dem_input = DEMInput(dt=dt, m_x=m_x, m_v=m_v, m_y=m_y, p=p, p_comp=p_comp,
                      ys=torch.tensor(ys, dtype=torch.float32),
                      eta_v=torch.tensor(vs, dtype=torch.float32),
