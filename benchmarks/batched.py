@@ -13,9 +13,7 @@ from matplotlib import pyplot as plt
 from hdm.core import len_generalized
 from hdm.noise import autocorr_friston, noise_cov_gen_theoretical
 from hdm.dummy import simulate_system
-from hdm.dem.batched import DEMInput, DEMState, dem_step_d, dem_step_precision
-from hdm.dem.naive import extract_dynamic
-from hdm.dem.batched import DEMState, DEMInput, dem_step_d, dem_step
+from hdm.dem.batched import DEMInput, DEMState, dem_step_d, dem_step_precision, dem_step
 
 
 @pytest.fixture
@@ -40,13 +38,12 @@ def dummy_dem_lorenz():
         return obs(x, v, params_true)
 
     rng = np.random.default_rng(215)
-    # n = 1024
     n = 30
     dt = 0.5
     vs = np.zeros((n, 1))
-    w_sd = 1
-    z_sd = 1
-    noise_temporal_sig = 5
+    w_sd = 0.5
+    z_sd = 0.5
+    noise_temporal_sig = 0.1
     ts, xs, ys, ws, zs = simulate_system(f_true, g_true, x0_true, dt, vs, w_sd, z_sd, noise_temporal_sig, rng=rng)
 
 
@@ -57,7 +54,7 @@ def dummy_dem_lorenz():
     p_comp = p
 
     x0_test = np.array([12,13,16])
-    p_v = torch.tensor(np.exp(3).reshape((1, 1)), dtype=torch.float32)
+    p_v = torch.tensor(np.exp(5).reshape((1, 1)), dtype=torch.float32)
 
     # doesn't matter, v is 0 anyway
     v_temporal_sig = 5
@@ -94,12 +91,11 @@ def dummy_dem_lorenz():
         x0 = P[0] * x[:, 1] - P[1] * x[:,0]
         x1 = P[2] * x[:, 0] - P[3] * x[:,2] * x[:,0] - P[4] * x[:,1]
         x2 = P[5] * x[:, 0] * x[:,1] - P[6] * x[:,2]
-        return (torch.concat([x0, x1, x2]) / 128.).reshape((b_num, -1, 1))
+        return (torch.stack([x0, x1, x2], axis=1) / 128.).reshape((b_num, -1, 1))
 
     def obs_torch_b(x, v, P):
         b_num = x.shape[0]
-        x = x.reshape((b_num, -1))
-        return torch.matmul(x, P[-3:]).reshape((b_num, -1, 1))
+        return torch.matmul(P[-3:].reshape((1, -1)), x).reshape((b_num, -1, 1))
 
     m_x = 3
     m_v = 1
