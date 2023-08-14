@@ -12,19 +12,21 @@ import torch
 import numpy as np
 from matplotlib import pyplot as plt
 
-from hdm.dem.naive import DEMInput, DEMState, free_action_from_state, dem_step
+from hdm.dem.naive import DEMInput, DEMState, free_action_from_state, dem_step, dem_step_d
 from hdm.core import deriv_mat, iterate_generalized, len_generalized
 from hdm.noise import generate_noise_conv, autocorr_friston, noise_cov_gen_theoretical
 from hdm.dummy import dummy_lti
 
-
+##
+## Note: This file is very much a potentially irrelevant work in progress
+##
 
 # Generate and simulate a little system
 m_x = 2
 m_v = 1
 m_y = 2
 
-n = 25
+n = 50
 dt = 0.1
 
 v_sd = 5 # standard deviation on inputs
@@ -38,10 +40,11 @@ seed = 546
 rng = np.random.default_rng(seed)
 
 A, B, C, D, x0, ts, vs, xs, ys, ws, zs = dummy_lti(
-        m_x, m_v, m_y, n, dt, v_sd, v_temporal_sig, w_sd, z_sd, noise_temporal_sig, rng)
+        m_x, m_v, m_y, n, dt, None, None, w_sd, z_sd, noise_temporal_sig, rng, v_sd=v_sd, v_temporal_sig=v_temporal_sig)
 
 A, B, C, D, x0, ts, vs, xs, ys, ws, zs = [torch.tensor(obj, dtype=torch.float32)
                                           for obj in [A, B, C, D, x0, ts, vs, xs, ys, ws, zs]]
+
 
 
 # Define a DEM model to invert it
@@ -126,6 +129,7 @@ def clean_state():
         dt=dt,
         m_x=m_x,
         m_v=m_v,
+        m_y=m_y,
         p=p,
         p_comp=p_comp,
         ys=ys,
@@ -159,50 +163,12 @@ def clean_state():
 
 dem_state = clean_state()
 
-lr_dynamic = 1
-lr_theta =  0.05
+lr_dynamic = 0.25
+lr_theta = 0.05
 lr_lambda = 0.01
 iter_lambda = 20
-iter_dem = 50
+iter_dem = 200
 m_min_improv = 0.01
-
-# ... interlude from test_dem.py ...
-from test_dem import dummy_dem_state, naive
-# FIXME
-
-m_x = 2
-m_v = 1
-m_y = 2
-
-n = 15
-dt = 0.1
-
-p = 4
-p_comp = 6
-
-w_sd = 0.1 # noise on states
-z_sd = 0.05 # noise on outputs
-noise_temporal_sig = 0.15 # temporal smoothing kernel parameter
-v_temporal_sig = 1 # temporal smoothness of inputs
-
-dem_state_naive, groundtruth = dummy_dem_state(
-        m_x, m_v, m_y, n, dt, p, p_comp, w_sd, z_sd,
-        noise_temporal_sig, v_temporal_sig,
-        seed=513, known_matrices=('B', 'C', 'D'))
-
-dem_state = dem_state_naive
-
-naive.dem_step_d(dem_state, 1)
-
-A = groundtruth['A']
-B = groundtruth['B']
-C = groundtruth['C']
-D = groundtruth['D']
-x0 = groundtruth['x0']
-xs = groundtruth['xs']
-vs = groundtruth['vs']
-ws = groundtruth['ws']
-zs = groundtruth['zs']
 
 params_hist = []
 f_bar_hist = []
@@ -210,6 +176,11 @@ table_rows = []
 dem_states = [copy(dem_state)]
 
 ideal_mu_x_tildes = list(iterate_generalized(xs, dt, p, p_comp=p_comp))
+
+# It seems like the LTI system cannot converge with wrong initial state
+dem_state.mu_x0_tilde = ideal_mu_x_tildes[0]
+
+dem_step_d(dem_state, 1)
 
 f_bar = free_action_from_state(dem_state)
 params_now = [p.clone().detach() for p in ABCD_from_params(dem_state.mu_theta)]
@@ -237,10 +208,10 @@ table_rows.append(table_row)
 print(tabulate(table_rows, headers='keys', floatfmt='.2f'))
 
 for i in tqdm(range(iter_dem)):
-    f_bar = free_action_from_state(dem_state)
     t0 = time()
     benchmark_ts = dem_step(dem_state, lr_dynamic, lr_theta, lr_lambda, iter_lambda, m_min_improv=m_min_improv, benchmark=True)
     tstep = time() - t0
+    f_bar = free_action_from_state(dem_state)
     params_now = [p.clone().detach() for p in ABCD_from_params(dem_state.mu_theta)]
 
     table_row = {
@@ -276,3 +247,22 @@ with open(outpath, 'w') as file_:
     writer = csv.DictWriter(file_, table_headers)
     writer.writeheader()
     writer.writerows(table_rows)
+
+# Plotting
+
+
+def extract_dynamic(state: DEMState):
+    mu_xs = torch.stack([mu_x_tilde[:state.input.m_x].clone().detach() for mu_x_tilde in state.mu_x_tildes], axis=0)[:,:,0]
+    sig_xs = torch.stack([sig_x_tilde[:state.input.m_x, :state.input.m_x].clone().detach() for sig_x_tilde in state.sig_x_tildes], axis=0)[:,:,0]
+    mu_vs = torch.stack([mu_v_tilde[:state.input.m_v].clone().detach() for mu_v_tilde in state.mu_v_tildes], axis=0)[:,:,0]
+    idx_first = int(state.input.p_comp // 2)
+    idx_last = idx_first + len(state.mu_x_tildes)
+    return mu_xs, sig_xs, mu_vs, idx_first, idx_last
+
+
+plt.plot(ts, xs[:, 0], label='Target')
+for i in range(1, 8):
+    mu_xs, sig_xs, mu_vs, idx_first, idx_last = extract_dynamic(dem_states[i])
+    plt.plot(ts[idx_first:idx_last], mu_xs[:, 0], label=f'{i}')
+plt.legend()
+plt.show()
