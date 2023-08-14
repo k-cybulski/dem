@@ -12,7 +12,7 @@ from matplotlib import pyplot as plt
 
 from hdm.core import iterate_generalized, deriv_mat
 from hdm.noise import autocorr_friston, noise_cov_gen_theoretical
-from hdm.dummy import sin_gen, cos_gen, combine_gen, simulate_system
+from hdm.dummy import sin_gen, cos_gen, combine_gen, simulate_system, assert_system_func_equivalence
 from hdm.dem.naive import _fix_grad_shape, generalized_func, DEMState, DEMInput, dem_step_d, kron
 
 from benchmarks.implementations.generalized_func import (
@@ -48,10 +48,20 @@ def dummy_dem_simple(n, rng=None):
     # Dynamics definition
     x0 = np.array([0, 1])
     A = np.array([[0, 1], [-1, 0]])
-    def f(x, v):
-        return A @ x
-    def g(x, v):
+
+    def f_para(x, v, params):
+        params = params.reshape((2,2))
+        return params @ x
+
+    def g_para(x, v, params):
         return x
+
+    def f(x, v):
+        return f_para(x, v, A)
+
+    def g(x, v):
+        return g_para(x, v, A)
+
 
     # noise standard deviations
     w_sd = 0.01 # noise on states
@@ -71,6 +81,8 @@ def dummy_dem_simple(n, rng=None):
 
     def dem_g(x, v, params):
         return x
+
+    assert_system_func_equivalence(f_para, dem_f, 2, 1, A)
 
     p = 4
     p_comp = p
@@ -177,7 +189,7 @@ def test_generalized_func_correctness():
     assert torch.isclose(torch.stack(out_naive), out_batched_manyhess).all()
 
 
-def test_generalized_func_speed():
+def benchmark_generalized_func_speed():
     nrun = 100
     ns = [10, 100, 250, 500, 1000]
     dt = 0.1
@@ -374,10 +386,10 @@ def test_internal_energy_dynamic_correctness():
     for name, tup1, tensor2 in zip(['t_theta', 't_lambda'], out_naive_listed[3:], out_batched[3:]):
         # numerical errors become larger here, so we need to increase tolerance
         assert torch.isclose(torch.sum(torch.stack(tup1), axis=0), tensor2,
-                             rtol=1e-04).all()
+                             rtol=1e-04, atol=1e-5).all()
 
 
-def test_internal_energy_dynamic_speed():
+def benchmark_internal_energy_dynamic_speed():
     ns = [10, 25, 50, 100]
     nrun = 20
 
@@ -609,7 +621,90 @@ def test_free_action_correctness():
     # seem particularly numerically stable...
     assert torch.isclose(f_bar_naive, f_bar_batched, rtol=1e-03).item()
 
-def test_free_action_speed():
+
+def test_free_action_compiled_correctness():
+    # A test for whether we can just use torch.compile on the free action to speed it up
+    # Verdict: No. The outputs are inconsistent. Also, depending on the
+    # transition functions f and g, sometimes the compilation process fails
+    n = 15
+    rng = np.random.default_rng(25)
+    dem_state = dummy_dem_simple(n, rng=rng)
+
+    y_tildes_n = list(dem_state.input.iter_y_tildes())
+    eta_v_tildes_n = list(dem_state.input.iter_eta_v_tildes())
+    p_v_tildes_n = list(dem_state.input.iter_p_v_tildes())
+    mu_x_tildes_n = dem_state.mu_x_tildes
+    mu_v_tildes_n = dem_state.mu_v_tildes
+    omega_w = dem_state.input.omega_w
+    omega_z = dem_state.input.omega_z
+    m_x = dem_state.input.m_x
+    m_v = dem_state.input.m_v
+    p = dem_state.input.p
+    mu_theta = dem_state.mu_theta
+    mu_lambda = dem_state.mu_lambda
+
+    y_tildes_b, eta_v_tildes_b, p_v_tildes_b, mu_x_tildes_b, mu_v_tildes_b = [
+            torch.stack(ls) for ls in
+            [y_tildes_n, eta_v_tildes_n, p_v_tildes_n, mu_x_tildes_n, mu_v_tildes_n]]
+    sig_x_tildes_b = torch.stack(dem_state.sig_x_tildes)
+    sig_v_tildes_b = torch.stack(dem_state.sig_v_tildes)
+
+    free_action_batched_c = torch.compile(free_action_batched)
+
+    f_bar_b = free_action_batched(
+            m_x=dem_state.input.m_x,
+            m_v=dem_state.input.m_v,
+            p=dem_state.input.p,
+            mu_x_tildes=mu_x_tildes_b,
+            mu_v_tildes=mu_v_tildes_b,
+            sig_x_tildes=sig_x_tildes_b,
+            sig_v_tildes=sig_v_tildes_b,
+            y_tildes=y_tildes_b,
+            eta_v_tildes=eta_v_tildes_b,
+            p_v_tildes=p_v_tildes_b,
+            eta_theta=dem_state.input.eta_theta,
+            eta_lambda=dem_state.input.eta_lambda,
+            p_theta=dem_state.input.p_theta,
+            p_lambda=dem_state.input.p_lambda,
+            mu_theta=dem_state.mu_theta,
+            mu_lambda=dem_state.mu_lambda,
+            sig_theta=dem_state.sig_theta,
+            sig_lambda=dem_state.sig_lambda,
+            g=dem_state.input.g,
+            f=dem_state.input.f,
+            omega_w=dem_state.input.omega_w,
+            omega_z=dem_state.input.omega_z,
+            noise_autocorr_inv=dem_state.input.noise_autocorr_inv)
+
+    f_bar_c = free_action_batched_c(
+            m_x=dem_state.input.m_x,
+            m_v=dem_state.input.m_v,
+            p=dem_state.input.p,
+            mu_x_tildes=mu_x_tildes_b,
+            mu_v_tildes=mu_v_tildes_b,
+            sig_x_tildes=sig_x_tildes_b,
+            sig_v_tildes=sig_v_tildes_b,
+            y_tildes=y_tildes_b,
+            eta_v_tildes=eta_v_tildes_b,
+            p_v_tildes=p_v_tildes_b,
+            eta_theta=dem_state.input.eta_theta,
+            eta_lambda=dem_state.input.eta_lambda,
+            p_theta=dem_state.input.p_theta,
+            p_lambda=dem_state.input.p_lambda,
+            mu_theta=dem_state.mu_theta,
+            mu_lambda=dem_state.mu_lambda,
+            sig_theta=dem_state.sig_theta,
+            sig_lambda=dem_state.sig_lambda,
+            g=dem_state.input.g,
+            f=dem_state.input.f,
+            omega_w=dem_state.input.omega_w,
+            omega_z=dem_state.input.omega_z,
+            noise_autocorr_inv=dem_state.input.noise_autocorr_inv)
+
+    # Fails due to silent inconsistencies in PyTorch
+    assert f_bar_b == f_bar_c
+
+def benchmark_free_action_speed():
     ns = [10, 100, 250, 500, 1000]
     nrun = 20
 
@@ -819,7 +914,7 @@ if __name__ == '__main__':
     test_free_action_correctness()
 
     print("Running speed benchmarks...")
-    test_generalized_func_speed()
-    test_internal_energy_dynamic_speed()
-    test_free_action_speed()
+    benchmark_generalized_func_speed()
+    benchmark_internal_energy_dynamic_speed()
+    benchmark_free_action_speed()
     pass

@@ -42,11 +42,8 @@ def internal_energy_dynamic(
 
     deriv_mat_x = torch.from_numpy(deriv_mat(p, m_x)).to(dtype=torch.float32)
     def _int_eng_dynamic(mu_x_tildes, mu_v_tildes, mu_theta, mu_lambda, diagnostic=False):
-        mu_theta = mu_theta
-        mu_lambda = mu_lambda
         g_tildes = generalized_func(g, mu_x_tildes, mu_v_tildes, m_x, m_v, p, mu_theta)
         f_tildes = generalized_func(f, mu_x_tildes, mu_v_tildes, m_x, m_v, p, mu_theta)
-
         err_y = y_tildes - g_tildes
         err_v = mu_v_tildes - eta_v_tildes
         err_x = torch.matmul(deriv_mat_x, mu_x_tildes) - f_tildes
@@ -132,7 +129,8 @@ def internal_action(
         eta_theta,
         eta_lambda,
         p_theta,
-        p_lambda
+        p_lambda,
+        compute_dds=True
     )
     u_t, u_t_x_tilde_dds, u_t_v_tilde_dds, u_t_theta_dd, u_t_lambda_dd = internal_energy_dynamic(
         g, f, mu_x_tildes, mu_v_tildes, y_tildes, m_x, m_v, p, mu_theta, eta_v_tildes, p_v_tildes,

@@ -11,7 +11,9 @@ from matplotlib import pyplot as plt
 from hdm.core import len_generalized
 from hdm.noise import autocorr_friston, noise_cov_gen_theoretical
 from hdm.dummy import simulate_system, assert_system_func_equivalence
-from hdm.dem.batched import DEMInput, DEMState, dem_step_d, dem_step_precision
+from hdm.dem.batched import (DEMInput, DEMState, dem_step_d,
+                             dem_step_precision, dem_step_m, dem_step_e,
+                             free_action)
 from hdm.dem.util import extract_dynamic
 
 ## Prior expectations (and true values)
@@ -37,7 +39,7 @@ def g_true(x, v):
 
 rng = np.random.default_rng(215)
 # n = 1024
-n = 1024 # = 500
+n = 17 # = 500
 dt = 1
 vs = np.zeros((n, 1))
 w_sd = 0 # 1
@@ -73,7 +75,6 @@ mu_x0 = torch.tensor(x0_test, dtype=torch.float32)
 mu_x0_tilde = torch.tensor(np.concatenate((x0_test, rng.normal([0] * 3 * p))), dtype=torch.float32).reshape((-1, 1))
 mu_v0_tilde = torch.tensor(np.zeros((p + 1, 1)), dtype=torch.float32)
 
-
 def lorenz_torch_b(x, v, P):
     b_num = x.shape[0]
     x = x.reshape((b_num, -1))
@@ -86,13 +87,13 @@ def obs_torch_b(x, v, P):
     b_num = x.shape[0]
     return torch.matmul(P[-3:].reshape((1, -1)), x).reshape((b_num, -1, 1))
 
-
 m_x = 3
 m_v = 1
 m_y = 1
 
 assert_system_func_equivalence(lorenz, lorenz_torch_b, 3, 1, params_true)
 assert_system_func_equivalence(obs, obs_torch_b, 3, 1, params_true)
+
 
 dem_input = DEMInput(dt=dt, m_x=m_x, m_v=m_v, m_y=m_y, p=p, p_comp=p_comp,
                      ys=torch.tensor(ys, dtype=torch.float32),
@@ -117,10 +118,10 @@ dem_state = DEMState.from_input(dem_input, mu_x0,
                                 mu_lambda=torch.tensor([math.exp(-10), math.exp(-20)]))
 
 ## Interlude for diagnostics
-# from hdm.core import iterate_generalized
-# x_tildes_gt = torch.stack(list(iterate_generalized(torch.tensor(xs, dtype=torch.float32), dt, p)))
-# dem_state.mu_x_tildes = x_tildes_gt
-# f_bar, extr = dem_state.free_action(diagnostic=True)
+from hdm.core import iterate_generalized
+x_tildes_gt = torch.stack(list(iterate_generalized(torch.tensor(xs, dtype=torch.float32), dt, p)))
+dem_state.mu_x_tildes = x_tildes_gt
+f_bar, extr = dem_state.free_action(diagnostic=True)
 ## End interlude
 
 lr_dynamic = 1
@@ -143,7 +144,7 @@ dem_step_precision(dem_state)
 dem_step_d(dem_state, lr_dynamic)
 
 fig, ax = plt.subplots()
-mu_xs2, sig_xs2, mu_vs2, ts2 = extract_dynamic(dem_state)
+mu_xs2, sig_xs2, mu_vs2, sig_vs2, ts2 = extract_dynamic(dem_state)
 ax.plot(ts, xs[:, 0], label='Target 1', color='blue')
 ax.plot(ts2, mu_xs2[:, 0], label='Model 1', color='blue', linestyle='--')
 ax.plot(ts, xs[:, 1], label='Target 2', color='red')

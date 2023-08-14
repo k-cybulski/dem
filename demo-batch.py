@@ -19,7 +19,7 @@ import numpy as np
 
 
 from hdm.dem.util import extract_dynamic
-from hdm.dem.batched import DEMInput, DEMState, dem_step, dem_step_d, dem_step_precision
+from hdm.dem.batched import DEMInput, DEMState, dem_step, dem_step_d, dem_step_precision, free_action
 from hdm.core import deriv_mat, iterate_generalized, len_generalized
 from hdm.noise import generate_noise_conv, autocorr_friston, noise_cov_gen_theoretical
 from hdm.dummy import dummy_lti
@@ -28,14 +28,14 @@ from hdm.dummy import dummy_lti
 m_x = 2
 m_v = 1
 m_y = 2
-n = 30
+n = 20
 dt = 0.5
 x0 = np.zeros(m_x)
 vs = np.zeros((n, m_v))
-vs[5:20] = 20 # impulse
+vs[5:10] = 20 # impulse
 w_sd = 0
-z_sd = 0.3
-noise_temporal_sig = 0.3
+z_sd = 0.
+noise_temporal_sig = 0.1
 rng = np.random.default_rng(70)#6)
 
 def ABCD_from_params(params):
@@ -136,6 +136,7 @@ def dem_state_from_lti(A, B, C, D, x0, ts, vs, xs, ys, ws, zs,
     p_lambda = torch.eye(2, dtype=torch.float32)
 
     mu_theta = torch.concat(mu_thetas)
+    mu_lambda = torch.tensor([math.exp(0), math.exp(-10)])
 
     # Covariance structure of noises
     ## the way we generate them now, they are necessarily independent
@@ -189,21 +190,8 @@ def dem_state_from_lti(A, B, C, D, x0, ts, vs, xs, ys, ws, zs,
         omega_z=omega_z,
         noise_autocorr_inv=noise_autocorr_inv_,
     )
-    dem_state = DEMState.from_input(dem_input, x0)
-    dem_state = replace(dem_state, mu_theta=mu_theta)
-
-    groundtruth = {
-            'A': A.clone(),
-            'B': B.clone(),
-            'C': C.clone(),
-            'D': D.clone(),
-            'x0': x0.clone(),
-            'xs': xs.clone(),
-            'vs': vs.clone(),
-            'ws': ws.clone(),
-            'zs': zs.clone()
-    }
-    return dem_state, groundtruth
+    dem_state = DEMState.from_input(dem_input, x0, mu_theta=mu_theta, mu_lambda=mu_lambda)
+    return dem_state
 
 
 A, B, C, D, x0, ts, vs, xs, ys, ws, zs = [torch.tensor(obj, dtype=torch.float32)
@@ -213,17 +201,44 @@ p = 4
 p_comp = p
 v_temporal_sig = 1
 
-dem_state, groundtruth = dem_state_from_lti(A, B, C, D, x0, ts, vs, xs, ys, ws, zs,
+dem_state = dem_state_from_lti(A, B, C, D, x0, ts, vs, xs, ys, ws, zs,
                        p, p_comp, w_sd, z_sd, noise_temporal_sig, v_temporal_sig,
-                       seed=2532, known_matrices=('B', 'C', 'D'))
+                       seed=2532, known_matrices=('A', 'B', 'C', 'D'))
+# Do an initial run to get precision estimates
+dem_step_d(dem_state, 1) # Do an initial run
+dem_step_precision(dem_state)
 
-lr_dynamic = 0.25
-lr_theta = 0.05
-lr_lambda = 0.01
+# Interlude for diagnostics
+f_bar, extr = dem_state.free_action(diagnostic=True)
+pdict = {
+    key: (item.norm().detach().item(), item.max().detach().item())
+    for key, item in extr.items()
+    if isinstance(item, torch.Tensor)
+}
+print(tabulate([(key, *item) for key, item in pdict.items()], headers=('variable', 'norm', 'max'), floatfmt='.3f'))
+# End interlude
+
+mu_xs, sig_xs, mu_vs, sig_vs, tsm = extract_dynamic(dem_state)
+plt.plot(ts, xs[:, 0], label='Target 1')
+plt.plot(tsm, mu_xs[:, 0], label=f'Model 1')
+plt.plot(ts, xs[:, 1], label='Target 2')
+plt.plot(tsm, mu_xs[:, 1], label=f'Model 2')
+plt.plot(ts, vs[:, 0], label='Input')
+plt.plot(tsm, sig_xs[:, 0], label=f'Variance 1')
+plt.legend()
+plt.show()
+
+# Parameters for the optimization procedure
+lr_dynamic = 1
+lr_theta = 0.0001
+lr_lambda = 0.001
 iter_lambda = 20
 iter_dem = 200
 m_min_improv = 0.01
 
+f_bar = dem_state.free_action()
+
+## Some helper lists to track how the model develops over time
 params_hist = []
 f_bar_hist = []
 table_rows = []
@@ -231,10 +246,6 @@ dem_states = [copy(dem_state)]
 
 ideal_mu_x_tildes = list(iterate_generalized(xs, dt, p, p_comp=p_comp))
 
-dem_step_d(dem_state, 1) # Do an initial run
-dem_step_precision(dem_state)
-
-f_bar = dem_state.free_action()
 params_now = [p.clone().detach() for p in ABCD_from_params(dem_state.mu_theta)]
 
 table_row = {
@@ -288,7 +299,7 @@ with open(outpath, 'w') as file_:
 
 plt.plot(ts, xs[:, 0], label='Target')
 for i in range(1, 8):
-    mu_xs, sig_xs, mu_vs, ts = extract_dynamic(dem_states[i])
-    plt.plot(ts, mu_xs[:, 0], label=f'{i}')
+    mu_xs, sig_xs, mu_vs, sig_vs, tsm = extract_dynamic(dem_states[i])
+    plt.plot(tsm, mu_xs[:, 0], label=f'{i}')
 plt.legend()
 plt.show()
