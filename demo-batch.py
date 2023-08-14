@@ -67,7 +67,7 @@ A, B, C, D, x0, ts, vs, xs, ys, ws, zs = [torch.tensor(obj, dtype=torch.float32)
 
 def dem_state_from_lti(A, B, C, D, x0, ts, vs, xs, ys, ws, zs,
                        p, p_comp, w_sd, z_sd, noise_temporal_sig, v_temporal_sig,
-                       seed, known_matrices=('B', 'C', 'D')):
+                       seed, known_matrices):
     """
     Returns a hdm.dem.batched.DEMState for a dummy LTI inversion problem.
     """
