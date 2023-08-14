@@ -116,7 +116,6 @@ def internal_energy_static(
     u_c_lambda = _int_eng_par_static(mu_lambda, eta_lambda, p_lambda)
     u_c = u_c_theta + u_c_lambda
 
-    # FIXME OPT: Don't run torch.autograd.functional.hessian twice.
     if compute_dds:
         u_c_theta_dd = torch.autograd.functional.hessian(lambda mu: _int_eng_par_static(mu, eta_theta, p_theta), mu_theta, create_graph=True)
         u_c_lambda_dd = torch.autograd.functional.hessian(lambda mu: _int_eng_par_static(mu, eta_lambda, p_lambda), mu_lambda, create_graph=True)
@@ -690,12 +689,3 @@ def dem_step(state: DEMState, lr_dynamic, lr_theta, lr_lambda, iter_lambda, m_mi
     if benchmark:
         benchmark_tprec = time() - benchmark_t0
         return {'ts_d': benchmark_ts_d, 'ts_m': benchmark_ts_m, 't_e': benchmark_te, 't_prec': benchmark_tprec}
-
-
-def extract_dynamic(state: DEMState):
-    mu_xs = torch.stack([mu_x_tilde[:state.input.m_x].clone().detach() for mu_x_tilde in state.mu_x_tildes], axis=0)[:,:,0]
-    sig_xs = torch.stack([sig_x_tilde[:state.input.m_x, :state.input.m_x].clone().detach() for sig_x_tilde in state.sig_x_tildes], axis=0)[:,:,0]
-    mu_vs = torch.stack([mu_v_tilde[:state.input.m_v].clone().detach() for mu_v_tilde in state.mu_v_tildes], axis=0)[:,:,0]
-    idx_first = int(state.input.p_comp // 2)
-    idx_last = idx_first + len(mu_xs)
-    return mu_xs, sig_xs, mu_vs, idx_first, idx_last

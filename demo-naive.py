@@ -10,6 +10,7 @@ from matplotlib import pyplot as plt
 
 from hdm.core import deriv_mat, iterate_generalized
 from hdm.noise import generate_noise_conv, autocorr_friston, noise_cov_gen_theoretical
+from hdm.dem.util import extract_dynamic
 
 plot = False
 
@@ -474,6 +475,8 @@ def dem_step_d(state: DEMState, lr):
     mu_v_tilde_t = state.mu_v0_tilde.clone().detach()
     mu_x_tildes = [mu_x_tilde_t]
     mu_v_tildes = [mu_v_tilde_t]
+    deriv_mat_x = torch.from_numpy(deriv_mat(state.input.p, state.input.m_x)).to(dtype=torch.float32)
+    deriv_mat_v = torch.from_numpy(deriv_mat(state.input.p, state.input.m_v)).to(dtype=torch.float32)
     for t, (y_tilde,
          sig_x_tilde, sig_v_tilde,
          eta_v_tilde, p_v_tilde) in enumerate(zip(
@@ -517,12 +520,12 @@ def dem_step_d(state: DEMState, lr):
         mu_v_tilde_t = mu_v_tilde_t.clone().detach().requires_grad_()
         f_eng = dynamic_free_energy(mu_x_tilde_t, mu_v_tilde_t)
         # NOTE: In the original pseudocode, x and v are in one vector
-        x_d = lr * torch.autograd.grad(f_eng, mu_x_tilde_t, retain_graph=True)[0]
-        v_d = lr * torch.autograd.grad(f_eng, mu_v_tilde_t)[0]
+        x_d = deriv_mat_x @ mu_x_tilde_t + lr * torch.autograd.grad(f_eng, mu_x_tilde_t, retain_graph=True)[0]
+        v_d = deriv_mat_v @ mu_v_tilde_t + lr * torch.autograd.grad(f_eng, mu_v_tilde_t)[0]
         x_dd = lr * torch.autograd.functional.hessian(lambda mu: dynamic_free_energy(mu, mu_v_tilde_t), mu_x_tilde_t)
         v_dd = lr * torch.autograd.functional.hessian(lambda mu: dynamic_free_energy(mu_x_tilde_t, mu), mu_v_tilde_t)
-        x_dd = _fix_grad_shape(x_dd)
-        v_dd = _fix_grad_shape(v_dd)
+        x_dd = deriv_mat_x + _fix_grad_shape(x_dd)
+        v_dd = deriv_mat_v + _fix_grad_shape(v_dd)
         step_matrix_x = (torch.matrix_exp(x_dd) - torch.eye(x_dd.shape[0])) @ torch.linalg.inv(x_dd)
         step_matrix_v = (torch.matrix_exp(v_dd) - torch.eye(v_dd.shape[0])) @ torch.linalg.inv(v_dd)
         mu_x_tilde_t = mu_x_tilde_t + step_matrix_x @ x_d
@@ -808,58 +811,53 @@ def clean_state():
 # Do a single step to find optimal sigmas
 # dem_static_step(dem_state, lr_theta=0.01, lr_lambda0=0.01, iter_lambda=1)
 
-def extract_dynamic(state: DEMState):
-    mu_xs = torch.stack([mu_x_tilde[:state.input.m_x].clone().detach() for mu_x_tilde in state.mu_x_tildes], axis=0)[:,:,0]
-    sig_xs = torch.stack([sig_x_tilde[:state.input.m_x, :state.input.m_x].clone().detach() for sig_x_tilde in state.sig_x_tildes], axis=0)[:,:,0]
-    mu_vs = torch.stack([mu_v_tilde[:state.input.m_v].clone().detach() for mu_v_tilde in state.mu_v_tildes], axis=0)[:,:,0]
-    idx_first = int(state.input.p_comp // 2)
-    idx_last = idx_first + len(state.mu_x_tildes)
-    return mu_xs, sig_xs, mu_vs, idx_first, idx_last
-
-
 # Part 3: Run the DEM procedure
 
-dem_state = clean_state()
+if __name__ == '__main__':
+    dem_state = clean_state()
 
-mu_xss = []
-sig_xss = []
-mu_vss = []
-mu_thetas = []
-sig_thetas = []
-lr_thetas = []
-f_bars = []
+    dem_states = [dem_state]
 
-lr_dynamic = 1
-lr_theta0 =  5
-lr_theta_rate_coeff = 20 # after how many steps does it get to half of lr_theta0
-lr_lambda = 0.01
-iter_lambda = 20
-iter_dem = 200
-m_min_improv = 0.01
+    mu_xss = []
+    sig_xss = []
+    mu_vss = []
+    mu_thetas = []
+    sig_thetas = []
+    lr_thetas = []
+    f_bars = []
 
-# DEM procedure
-for i in range(iter_dem):
-    # heuristic for decreasing learning rate
-    lr_theta = lr_theta_rate_coeff * lr_theta0 / (i + lr_theta_rate_coeff)
-    f_bar = free_action_from_state(dem_state)
-    print(f"{i}. {f_bar.item()}")
-    print(f"""  theta = [ {dem_state.mu_theta[0]:.3f}, {dem_state.mu_theta[1]:.3f},
-          {dem_state.mu_theta[2]:.3f}, {dem_state.mu_theta[3]:.3f} ]""")
-    print(f"""  mu_lambda_z = {dem_state.mu_lambda[0]:.3f}, mu_lambda_w = {dem_state.mu_lambda[1]:.3f}""")
-    print(f"""  x0 = [ {dem_state.mu_x0_tilde[0].item():.3f}, {dem_state.mu_x0_tilde[1].item():.3f} ]""")
-    print(f"""  v0 = [ {dem_state.mu_v0_tilde[0].item():.3f}, {dem_state.mu_v0_tilde[1].item():.3f} ]""")
-    dem_step_d(dem_state, lr=lr_dynamic)
-    f_bar = free_action_from_state(dem_state)
-    print(f"  (D). {f_bar.item()}")
-    dem_step_m(dem_state, lr_lambda=lr_lambda, iter_lambda=iter_lambda, min_improv=m_min_improv)
-    dem_step_ex0(dem_state, lr_theta=lr_theta)
-    dem_step_precision(dem_state)
+    lr_dynamic = 1
+    lr_theta0 =  5
+    lr_theta_rate_coeff = 20 # after how many steps does it get to half of lr_theta0
+    lr_lambda = 0.01
+    iter_lambda = 20
+    iter_dem = 200
+    m_min_improv = 0.01
 
-    mu_xs, sig_xs, mu_vs, idx_first, idx_last = extract_dynamic(dem_state)
-    mu_xss.append(mu_xs)
-    sig_xss.append(sig_xs)
-    mu_vss.append(mu_vs)
-    f_bars.append(f_bar.clone().detach())
-    mu_thetas.append(dem_state.mu_theta.clone().detach())
-    sig_thetas.append(dem_state.sig_theta.clone().detach())
-    lr_thetas.append(lr_theta)
+    # DEM procedure
+    for i in range(iter_dem):
+        # heuristic for decreasing learning rate
+        lr_theta = lr_theta_rate_coeff * lr_theta0 / (i + lr_theta_rate_coeff)
+        f_bar = free_action_from_state(dem_state)
+        print(f"{i}. {f_bar.item()}")
+        print(f"""  theta = [ {dem_state.mu_theta[0]:.3f}, {dem_state.mu_theta[1]:.3f},
+              {dem_state.mu_theta[2]:.3f}, {dem_state.mu_theta[3]:.3f} ]""")
+        print(f"""  mu_lambda_z = {dem_state.mu_lambda[0]:.3f}, mu_lambda_w = {dem_state.mu_lambda[1]:.3f}""")
+        print(f"""  x0 = [ {dem_state.mu_x0_tilde[0].item():.3f}, {dem_state.mu_x0_tilde[1].item():.3f} ]""")
+        print(f"""  v0 = [ {dem_state.mu_v0_tilde[0].item():.3f}, {dem_state.mu_v0_tilde[1].item():.3f} ]""")
+        dem_step_d(dem_state, lr=lr_dynamic)
+        f_bar = free_action_from_state(dem_state)
+        print(f"  (D). {f_bar.item()}")
+        dem_step_m(dem_state, lr_lambda=lr_lambda, iter_lambda=iter_lambda, min_improv=m_min_improv)
+        dem_step_ex0(dem_state, lr_theta=lr_theta)
+        dem_step_precision(dem_state)
+
+        mu_xs, sig_xs, mu_vs, sig_vs, tsm = extract_dynamic(dem_state)
+        mu_xss.append(mu_xs)
+        sig_xss.append(sig_xs)
+        mu_vss.append(mu_vs)
+        f_bars.append(f_bar.clone().detach())
+        mu_thetas.append(dem_state.mu_theta.clone().detach())
+        sig_thetas.append(dem_state.sig_theta.clone().detach())
+        lr_thetas.append(lr_theta)
+        dem_states.append(copy(dem_state))

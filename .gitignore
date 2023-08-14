@@ -1,6 +1,10 @@
 # From: https://github.com/github/gitignore/blob/main/Python.gitignore
 # somewhat of an overkill, but whatever
 
+# profiling
+prof
+out
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
