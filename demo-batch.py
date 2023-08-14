@@ -28,15 +28,16 @@ from hdm.dummy import dummy_lti
 m_x = 2
 m_v = 1
 m_y = 2
-n = 20
+n = 30
 dt = 0.5
 x0 = np.zeros(m_x)
 vs = np.zeros((n, m_v))
-vs[5:10] = 20 # impulse
+vs[5:10,0] = np.arange(5) # triangular impulse
+vs[10:15,0] = np.arange(5)[::-1]
 w_sd = 0
 z_sd = 0.
 noise_temporal_sig = 0.1
-rng = np.random.default_rng(70)#6)
+rng = np.random.default_rng(70)
 
 def ABCD_from_params(params):
     shapes = ((m_x, m_x),
@@ -60,10 +61,6 @@ def ABCD_from_params(params):
 A, B, C, D, x0, ts, vs, xs, ys, ws, zs = dummy_lti(m_x=m_x, m_v=m_v, m_y=m_y, n=n, dt=dt,
               x0=x0, vs=vs,
               w_sd=w_sd, z_sd=z_sd, noise_temporal_sig=noise_temporal_sig, rng=rng)
-
-plt.plot(ts, xs)
-plt.plot(ts, vs)
-plt.show()
 
 A, B, C, D, x0, ts, vs, xs, ys, ws, zs = [torch.tensor(obj, dtype=torch.float32)
                                           for obj in [A, B, C, D, x0, ts, vs, xs, ys, ws, zs]]
@@ -89,7 +86,7 @@ def dem_state_from_lti(A, B, C, D, x0, ts, vs, xs, ys, ws, zs,
 
     # Prior precisions on known or unknown parameters
     precision_unknown = 1 # weak prior on unknown parmaeters
-    precision_known = math.exp(5) # strong prior on known parameters
+    precision_known = math.exp(8) # strong prior on known parameters
 
     # Temporal autocorrelation structure
     v_autocorr = torch.tensor(noise_cov_gen_theoretical(p, sig=v_temporal_sig, autocorr=autocorr_friston()), dtype=torch.float32)
@@ -136,7 +133,7 @@ def dem_state_from_lti(A, B, C, D, x0, ts, vs, xs, ys, ws, zs,
     p_lambda = torch.eye(2, dtype=torch.float32)
 
     mu_theta = torch.concat(mu_thetas)
-    mu_lambda = torch.tensor([math.exp(0), math.exp(-10)])
+    mu_lambda = torch.tensor([math.exp(0), math.exp(-8)])
 
     # Covariance structure of noises
     ## the way we generate them now, they are necessarily independent
@@ -194,9 +191,6 @@ def dem_state_from_lti(A, B, C, D, x0, ts, vs, xs, ys, ws, zs,
     return dem_state
 
 
-A, B, C, D, x0, ts, vs, xs, ys, ws, zs = [torch.tensor(obj, dtype=torch.float32)
-                                          for obj in [A, B, C, D, x0, ts, vs, xs, ys, ws, zs]]
-
 p = 4
 p_comp = p
 v_temporal_sig = 1
@@ -211,11 +205,11 @@ dem_step_precision(dem_state)
 # Interlude for diagnostics
 f_bar, extr = dem_state.free_action(diagnostic=True)
 pdict = {
-    key: (item.norm().detach().item(), item.max().detach().item())
+    key: (item.norm().detach().item(), item.max().detach().item(), item.min().detach().item())
     for key, item in extr.items()
     if isinstance(item, torch.Tensor)
 }
-print(tabulate([(key, *item) for key, item in pdict.items()], headers=('variable', 'norm', 'max'), floatfmt='.3f'))
+print(tabulate([(key, *item) for key, item in pdict.items()], headers=('variable', 'norm', 'max', 'min'), floatfmt='.3f'))
 # End interlude
 
 mu_xs, sig_xs, mu_vs, sig_vs, tsm = extract_dynamic(dem_state)
