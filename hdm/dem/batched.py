@@ -8,6 +8,7 @@ from typing import Callable, Iterable
 from itertools import repeat
 from time import time
 
+from tqdm import tqdm
 import torch
 
 from ..core import deriv_mat, iterate_generalized
@@ -276,8 +277,9 @@ class DEMInput:
     m_v: int
     m_y: int
     # how many derivatives to track
-    p: int
+    p: int # for states
     p_comp: int # can be equal to p or greater
+    d: int # for inputs
 
     # system output
     ys: torch.Tensor
@@ -413,7 +415,7 @@ class DEMState:
         assert len(x0) == input.m_x
 
         mu_x0_tilde = torch.concat([x0, torch.zeros(input.p * input.m_x)]).reshape((-1, 1))
-        mu_v_tildes = torch.stack(list(iterate_generalized(input.eta_v, input.dt, input.p, p_comp=input.p_comp)))
+        mu_v_tildes = torch.stack(list(iterate_generalized(input.eta_v, input.dt, input.d, p_comp=input.p_comp)))
 
         # TODO: What is a good value here?
         # this one shouldn't be *horrible*, but is very arbitrary
@@ -453,15 +455,15 @@ def dem_step_d(state: DEMState, lr):
     mu_x_tildes = [mu_x_tilde_t]
     mu_v_tildes = [mu_v_tilde_t]
     deriv_mat_x = torch.from_numpy(deriv_mat(state.input.p, state.input.m_x)).to(dtype=torch.float32)
-    deriv_mat_v = torch.from_numpy(deriv_mat(state.input.p, state.input.m_v)).to(dtype=torch.float32)
+    deriv_mat_v = torch.from_numpy(deriv_mat(state.input.d, state.input.m_v)).to(dtype=torch.float32)
     for t, (y_tilde,
          sig_x_tilde, sig_v_tilde,
-         eta_v_tilde, p_v_tilde) in enumerate(zip(
+         eta_v_tilde, p_v_tilde) in tqdm(enumerate(zip(
                             state.input.y_tildes,
                             state.sig_x_tildes, state.sig_v_tildes,
                             state.input.eta_v_tildes,
                             state.input.p_v_tildes,
-                            strict=True)):
+                            strict=True)), total=len(state.input.p_v_tildes), desc="Step D"):
         def dynamic_free_energy(mu_x_tilde_t, mu_v_tilde_t):
             # free action as a function of dynamic terms
             # NOTE: We can't just use free_action_from_state(replace(state, ...))
@@ -537,7 +539,7 @@ def dem_step_m(state: DEMState, lr_lambda, iter_lambda, min_improv):
     """
     # FIXME: Do 'until convergence' rather than 'for some fixed number of steps'
     last_f_bar = None
-    for i in range(iter_lambda):
+    for i in tqdm(range(iter_lambda), desc="Step M"):
         def lambda_free_action(mu_lambda):
             # free action as a function of lambda
             return replace(state, mu_lambda=mu_lambda).free_action()
