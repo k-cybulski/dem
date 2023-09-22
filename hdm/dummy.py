@@ -65,8 +65,17 @@ def wrap_with_innovations(ts, ws, vs):
         return f
     return wrapper
 
+def solve_ivp_euler(ode_f, t_span, x0, ts):
+    dts = ts[1:] - ts[:-1]
+    xs = [x0]
+    x = x0
+    for t, dt in zip(ts, dts):
+        df = ode_f(t, x)
+        x = x + dt * df
+        xs.append(x)
+    return np.stack(xs)
 
-def simulate_system(f, g, x0, dt, vs, w_sd, z_sd, noise_temporal_sig, rng=None):
+def simulate_system(f, g, x0, dt, vs, w_sd, z_sd, noise_temporal_sig, rng=None, method='euler'):
     """
     Simulates a system defined by
 
@@ -113,8 +122,13 @@ def simulate_system(f, g, x0, dt, vs, w_sd, z_sd, noise_temporal_sig, rng=None):
     def ode_f(x, v):
         return f(x, v)
 
-    out = solve_ivp(ode_f, t_span, x0, t_eval=ts)
-    xs = out.y.T
+    if method == 'scipy':
+        out = solve_ivp(ode_f, t_span, x0, t_eval=ts)
+        xs = out.y.T
+    elif method == 'euler':
+        xs = solve_ivp_euler(ode_f, t_span, x0, ts)
+    else:
+        raise ValueError("Unsupported method for integrating ODEs")
 
     gs = np.array([
         g(x, v).reshape(-1) for x, v in zip(xs, vs)
