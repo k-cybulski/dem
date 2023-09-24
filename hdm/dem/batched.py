@@ -40,8 +40,8 @@ def generalized_func(func, mu_x_tildes, mu_v_tildes, m_x, m_v, p, params):
 def internal_energy_dynamic(
         g, f, mu_x_tildes, mu_v_tildes, y_tildes, m_x, m_v, p, mu_theta, eta_v_tildes, p_v_tildes,
         mu_lambda, omega_w, omega_z, noise_autocorr_inv, diagnostic=False):
-
-    deriv_mat_x = torch.from_numpy(deriv_mat(p, m_x)).to(dtype=torch.float32)
+    dtype = mu_theta.dtype # all required variables should have the same dtype at this point
+    deriv_mat_x = torch.from_numpy(deriv_mat(p, m_x)).to(dtype=dtype)
     def _int_eng_dynamic(mu_x_tildes, mu_v_tildes, mu_theta, mu_lambda, diagnostic=False):
         g_tildes = generalized_func(g, mu_x_tildes, mu_v_tildes, m_x, m_v, p, mu_theta)
         f_tildes = generalized_func(f, mu_x_tildes, mu_v_tildes, m_x, m_v, p, mu_theta)
@@ -260,6 +260,13 @@ def free_action(
     else:
         return f_bar
 
+def _verify_attr_dtypes(parent, attributes, dtype):
+    for attr in attributes:
+        obj = getattr(parent, attr)
+        if not isinstance(obj, torch.Tensor):
+            raise ValueError(f"{attr} must be a torch.Tensor")
+        if obj.dtype != dtype:
+            raise ValueError(f"{attr} must be of dtype {dtype}")
 
 @dataclass
 class DEMInput:
@@ -310,6 +317,9 @@ class DEMInput:
     eta_v_tildes: torch.Tensor = None
     p_v_tildes: torch.Tensor = None
 
+    # Numeric precision
+    dtype: torch.dtype = None
+
     def __post_init__(self):
         if self.ys.ndim == 1:
             self.ys = self.ys.reshape((-1, 1))
@@ -324,6 +334,21 @@ class DEMInput:
         if self.p_v_tildes is None:
             p_v_tilde = kron(self.v_autocorr_inv, self.p_v)
             self.p_v_tildes = p_v_tilde.expand(len(self.eta_v_tildes), *p_v_tilde.shape)
+        if self.dtype is None:
+            self.dtype = self.ys.dtype
+        _verify_attr_dtypes(self, [
+            "ys",
+            "eta_v",
+            "p_v",
+            "v_autocorr_inv",
+            "eta_theta",
+            "eta_lambda",
+            "p_theta",
+            "p_lambda",
+            "omega_w",
+            "omega_z",
+            "noise_autocorr_inv"
+        ], self.dtype)
 
 @dataclass
 class DEMState:
@@ -349,6 +374,20 @@ class DEMState:
     # initial dynamic states
     mu_x0_tilde: torch.Tensor
     mu_v0_tilde: torch.Tensor
+
+    def __post_init__(self):
+        _verify_attr_dtypes(self, [
+            "mu_x_tildes",
+            "mu_v_tildes",
+            "sig_x_tildes",
+            "sig_v_tildes",
+            "mu_theta",
+            "mu_lambda",
+            "sig_theta",
+            "sig_lambda",
+            "mu_x0_tilde",
+            "mu_v0_tilde"
+        ], dtype=self.input.dtype)
 
     def free_action(self, skip_constant=False, diagnostic=False):
         state = self
@@ -454,8 +493,8 @@ def dem_step_d(state: DEMState, lr):
     mu_v_tilde_t = state.mu_v0_tilde.detach()
     mu_x_tildes = [mu_x_tilde_t]
     mu_v_tildes = [mu_v_tilde_t]
-    deriv_mat_x = torch.from_numpy(deriv_mat(state.input.p, state.input.m_x)).to(dtype=torch.float32)
-    deriv_mat_v = torch.from_numpy(deriv_mat(state.input.d, state.input.m_v)).to(dtype=torch.float32)
+    deriv_mat_x = torch.from_numpy(deriv_mat(state.input.p, state.input.m_x)).to(dtype=state.input.dtype)
+    deriv_mat_v = torch.from_numpy(deriv_mat(state.input.d, state.input.m_v)).to(dtype=state.input.dtype)
     for t, (y_tilde,
          sig_x_tilde, sig_v_tilde,
          eta_v_tilde, p_v_tilde) in tqdm(enumerate(zip(
