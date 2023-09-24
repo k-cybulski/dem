@@ -12,6 +12,7 @@ from matplotlib import pyplot as plt
 from tqdm import tqdm
 import pickle
 from tabulate import tabulate
+from pathlib import Path
 
 from hdm.noise import autocorr_friston, noise_cov_gen_theoretical
 from hdm.dem.batched import (DEMInput, DEMState, dem_step_d,
@@ -20,6 +21,8 @@ from hdm.dem.batched import (DEMInput, DEMState, dem_step_d,
                              free_action)
 from hdm.dem.util import extract_dynamic
 from hdm.dummy import simulate_colored_lti
+
+OUTPUT_DIR = Path('out/lti')
 
 # lti model definition
 A = np.array([[0.0484, 0.7535],
@@ -32,7 +35,7 @@ C = np.array([[0.2265, -0.4786],
 D = np.array([[0], [0], [0], [0]])
 
 x0 = np.zeros(2)
-t_max = 16
+t_max = 32
 dt = 0.1
 # input pulse
 vs = np.exp(-0.25 * (np.arange(0, t_max, dt) - 12)**2).reshape((-1, 1))
@@ -79,28 +82,30 @@ def ABC_from_params(params):
     A, B, C = matrs
     return A, B, C
 
+TORCH_DTYPE = torch.float64
+
 # Anil Meera & Wisse use 32, but that seems way too high for float32 which we
 # use (they use double precision)
-known_value_exp = 12
+known_value_exp = 32
 
 true_params = np.concatenate([A.reshape(-1), B.reshape(-1), C.reshape(-1)])
 
 # Priors for estimation
-p_v = torch.tensor(np.exp(known_value_exp), dtype=torch.float32).reshape((1,1))
-eta_v = torch.tensor(vs, dtype=torch.float32)
+p_v = torch.tensor(np.exp(known_value_exp), dtype=TORCH_DTYPE).reshape((1,1))
+eta_v = torch.tensor(vs, dtype=TORCH_DTYPE)
 
-eta_theta = torch.tensor(np.concatenate([rng.uniform(-2, 2, m_x * m_x + m_x * m_v), C.reshape(-1)]), dtype=torch.float32)
-p_theta_diag = torch.tensor(np.concatenate([np.full(m_x * m_x + m_x * m_v, np.exp(6)), np.full(m_y * m_x, np.exp(known_value_exp))]), dtype=torch.float32)
-p_theta = torch.tensor(np.diag(p_theta_diag), dtype=torch.float32)
+eta_theta = torch.tensor(np.concatenate([rng.uniform(-2, 2, m_x * m_x + m_x * m_v), C.reshape(-1)]), dtype=TORCH_DTYPE)
+p_theta_diag = torch.tensor(np.concatenate([np.full(m_x * m_x + m_x * m_v, np.exp(6)), np.full(m_y * m_x, np.exp(known_value_exp))]), dtype=TORCH_DTYPE)
+p_theta = torch.tensor(np.diag(p_theta_diag), dtype=TORCH_DTYPE)
 
-eta_lambda = torch.tensor(np.zeros(2), dtype=torch.float32)
-p_lambda = torch.tensor(np.eye(2) * np.exp(3), dtype=torch.float32)
+eta_lambda = torch.tensor(np.zeros(2), dtype=TORCH_DTYPE)
+p_lambda = torch.tensor(np.eye(2) * np.exp(3), dtype=TORCH_DTYPE)
 
 ## Some extras due to my implementation
-v_autocorr = torch.tensor(noise_cov_gen_theoretical(d, sig=noise_temporal_sig, autocorr=autocorr_friston()), dtype=torch.float32)
+v_autocorr = torch.tensor(noise_cov_gen_theoretical(d, sig=noise_temporal_sig, autocorr=autocorr_friston()), dtype=TORCH_DTYPE)
 v_autocorr_inv_ = torch.linalg.inv(v_autocorr)
 
-noise_autocorr = torch.tensor(noise_cov_gen_theoretical(p, sig=noise_temporal_sig, autocorr=autocorr_friston()), dtype=torch.float32)
+noise_autocorr = torch.tensor(noise_cov_gen_theoretical(p, sig=noise_temporal_sig, autocorr=autocorr_friston()), dtype=TORCH_DTYPE)
 noise_autocorr_inv_ = torch.linalg.inv(noise_autocorr)
 
 def dem_f(x, v, params):
@@ -113,8 +118,8 @@ def dem_g(x, v, params):
     return torch.matmul(C, x)
 
 dem_input = DEMInput(dt=dt, m_x=m_x, m_v=m_v, m_y=m_y, p=p, p_comp=p, d=d,
-                     ys=torch.tensor(ys, dtype=torch.float32),
-                     eta_v=torch.tensor(vs, dtype=torch.float32),
+                     ys=torch.tensor(ys, dtype=TORCH_DTYPE),
+                     eta_v=torch.tensor(vs, dtype=TORCH_DTYPE),
                      p_v=p_v,
                      v_autocorr_inv=v_autocorr_inv_,
                      eta_theta=eta_theta,
@@ -124,10 +129,10 @@ dem_input = DEMInput(dt=dt, m_x=m_x, m_v=m_v, m_y=m_y, p=p, p_comp=p, d=d,
                      f=dem_f,
                      g=dem_g,
                      noise_autocorr_inv=noise_autocorr_inv_,
-                     omega_w=torch.eye(m_x),
-                     omega_z=torch.eye(m_y))
+                     omega_w=torch.eye(m_x, dtype=TORCH_DTYPE),
+                     omega_z=torch.eye(m_y, dtype=TORCH_DTYPE))
 
-dem_state = DEMState.from_input(dem_input, torch.tensor(x0, dtype=torch.float32))
+dem_state = DEMState.from_input(dem_input, torch.tensor(x0, dtype=TORCH_DTYPE))
 
 # Let's see if it works
 dem_step_d(dem_state, 1)
@@ -168,6 +173,28 @@ print(tabulate([(key, *item) for key, item in pdict.items()], headers=('variable
 f_bars.append(f_bar)
 f_bar_diagnostics.append(extr)
 
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+def print_parameter_comparison(A, B, C, mu_thetas):
+    rows = []
+    with np.printoptions(precision=3, suppress=True):
+        for iter, mu_theta in enumerate(mu_thetas):
+            A_est, B_est, C_est = ABC_from_params(mu_theta)
+            A_diff = A - A_est.detach().numpy()
+            B_diff = B - B_est.detach().numpy()
+            C_diff = C - C_est.detach().numpy()
+            row = [
+                    iter,
+                    str(A_diff),
+                    str(B_diff),
+                    str(C_diff),
+                    str(np.linalg.norm(A_diff)),
+                    str(np.linalg.norm(B_diff)),
+                    str(np.linalg.norm(C_diff))
+            ]
+            rows.append(row)
+    print(tabulate(rows, headers=('Iter', 'A err', 'B err', 'C err', 'A err norm', 'B err norm', 'C err norm')))
+
 for i in tqdm(range(num_iter), desc="Running DEM..."):
     dem_step(dem_state, lr_dynamic, lr_theta, lr_lambda, iter_lambda, m_min_improv=m_min_improv)
     param_estimates.append(dem_state.mu_theta.clone().detach().numpy())
@@ -177,16 +204,16 @@ for i in tqdm(range(num_iter), desc="Running DEM..."):
     f_bars.append(f_bar)
     f_bar_diagnostics.append(extr)
 
-    with open(f'out/ntraj{i:02}.pkl', 'wb') as file_:
+    with open(OUTPUT_DIR / f'traj{i:02}.pkl', 'wb') as file_:
         pickle.dump(trajectories, file_)
 
-    with open(f'out/nparams{i:02}.pkl', 'wb') as file_:
+    with open(OUTPUT_DIR / f'params{i:02}.pkl', 'wb') as file_:
         pickle.dump(param_estimates, file_)
 
-    with open(f'out/nstates{i:02}.pkl', 'wb') as file_:
+    with open(OUTPUT_DIR / f'states{i:02}.pkl', 'wb') as file_:
         pickle.dump(dem_state, file_)
 
-    with open(f'out/nfbars{i:02}.pkl', 'wb') as file_:
+    with open(OUTPUT_DIR / f'fbars{i:02}.pkl', 'wb') as file_:
         pickle.dump(f_bars, file_)
 
     pdict = {
@@ -195,4 +222,5 @@ for i in tqdm(range(num_iter), desc="Running DEM..."):
         if isinstance(item, torch.Tensor)
     }
     print(tabulate([(key, *item) for key, item in pdict.items()], headers=('variable', 'norm', 'max', 'min'), floatfmt='.3f'))
+    print_parameter_comparison(A, B, C, param_estimates)
     print('fbar:',f_bars)
