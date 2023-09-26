@@ -285,7 +285,6 @@ class DEMInput:
     m_y: int
     # how many derivatives to track
     p: int # for states
-    p_comp: int # can be equal to p or greater
     d: int # for inputs
 
     # system output
@@ -320,17 +319,23 @@ class DEMInput:
     # Numeric precision
     dtype: torch.dtype = None
 
+    # Compute larger embeddings to truncate them?
+    p_comp: int = None # >= p
+    d_comp: int = None # >= d
+
     def __post_init__(self):
         if self.ys.ndim == 1:
             self.ys = self.ys.reshape((-1, 1))
         self.n = self.ys.shape[0]
         if self.p_comp is None:
             self.p_comp = self.p
+        if self.d_comp is None:
+            self.d_comp = self.d
         # Precomputed values
         if self.y_tildes is None:
             self.y_tildes = torch.stack(list(iterate_generalized(self.ys, self.dt, self.p, p_comp=self.p_comp)))
         if self.eta_v_tildes is None:
-            self.eta_v_tildes = torch.stack(list(iterate_generalized(self.eta_v, self.dt, self.p, p_comp=self.p_comp)))
+            self.eta_v_tildes = torch.stack(list(iterate_generalized(self.eta_v, self.dt, self.d, p_comp=self.d_comp, p_pad=self.p)))
         if self.p_v_tildes is None:
             p_v_tilde = kron(self.v_autocorr_inv, self.p_v)
             self.p_v_tildes = p_v_tilde.expand(len(self.eta_v_tildes), *p_v_tilde.shape)
@@ -454,7 +459,7 @@ class DEMState:
         assert len(x0) == input.m_x
 
         mu_x0_tilde = torch.concat([x0, torch.zeros(input.p * input.m_x)]).reshape((-1, 1))
-        mu_v_tildes = torch.stack(list(iterate_generalized(input.eta_v, input.dt, input.d, p_comp=input.p_comp)))
+        mu_v_tildes = input.eta_v_tildes.clone().detach()
 
         # TODO: What is a good value here?
         # this one shouldn't be *horrible*, but is very arbitrary
@@ -494,7 +499,7 @@ def dem_step_d(state: DEMState, lr):
     mu_x_tildes = [mu_x_tilde_t]
     mu_v_tildes = [mu_v_tilde_t]
     deriv_mat_x = torch.from_numpy(deriv_mat(state.input.p, state.input.m_x)).to(dtype=state.input.dtype)
-    deriv_mat_v = torch.from_numpy(deriv_mat(state.input.d, state.input.m_v)).to(dtype=state.input.dtype)
+    deriv_mat_v = torch.from_numpy(deriv_mat(state.input.p, state.input.m_v)).to(dtype=state.input.dtype)
     for t, (y_tilde,
          sig_x_tilde, sig_v_tilde,
          eta_v_tilde, p_v_tilde) in tqdm(enumerate(zip(

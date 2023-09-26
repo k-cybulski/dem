@@ -57,9 +57,8 @@ ts, xs, ys, ws, zs = simulate_colored_lti(A, B, C, D, x0, dt, vs, w_sd, z_sd, no
 
 # Now we define the model
 # embedding order
-p = 4 # for states
-d = p # for inputs
-# In the paper d = 2, but our implementation assumes equal number of entries
+p = 6 # for states
+d = 2 # for inputs
 
 m_x = 2
 m_v = 1
@@ -84,8 +83,7 @@ def ABC_from_params(params):
 
 TORCH_DTYPE = torch.float64
 
-# Anil Meera & Wisse use 32, but that seems way too high for float32 which we
-# use (they use double precision)
+# Anil Meera & Wisse use 32, but that seems way too high for our algorithm to work well
 known_value_exp = 32
 
 true_params = np.concatenate([A.reshape(-1), B.reshape(-1), C.reshape(-1)])
@@ -102,7 +100,7 @@ eta_lambda = torch.tensor(np.zeros(2), dtype=TORCH_DTYPE)
 p_lambda = torch.tensor(np.eye(2) * np.exp(3), dtype=TORCH_DTYPE)
 
 ## Some extras due to my implementation
-v_autocorr = torch.tensor(noise_cov_gen_theoretical(d, sig=noise_temporal_sig, autocorr=autocorr_friston()), dtype=TORCH_DTYPE)
+v_autocorr = torch.tensor(noise_cov_gen_theoretical(p, sig=noise_temporal_sig, autocorr=autocorr_friston()), dtype=TORCH_DTYPE)
 v_autocorr_inv_ = torch.linalg.inv(v_autocorr)
 
 noise_autocorr = torch.tensor(noise_cov_gen_theoretical(p, sig=noise_temporal_sig, autocorr=autocorr_friston()), dtype=TORCH_DTYPE)
@@ -117,7 +115,7 @@ def dem_g(x, v, params):
     C = params[(m_x * m_x + m_x * m_v):(m_x * m_x + m_x * m_v + m_y * m_x)].reshape((m_y, m_x))
     return torch.matmul(C, x)
 
-dem_input = DEMInput(dt=dt, m_x=m_x, m_v=m_v, m_y=m_y, p=p, p_comp=p, d=d,
+dem_input = DEMInput(dt=dt, m_x=m_x, m_v=m_v, m_y=m_y, p=p, d=d,
                      ys=torch.tensor(ys, dtype=TORCH_DTYPE),
                      eta_v=torch.tensor(vs, dtype=TORCH_DTYPE),
                      p_v=p_v,
@@ -180,9 +178,9 @@ def print_parameter_comparison(A, B, C, mu_thetas):
     with np.printoptions(precision=3, suppress=True):
         for iter, mu_theta in enumerate(mu_thetas):
             A_est, B_est, C_est = ABC_from_params(mu_theta)
-            A_diff = A - A_est.detach().numpy()
-            B_diff = B - B_est.detach().numpy()
-            C_diff = C - C_est.detach().numpy()
+            A_diff = A - A_est
+            B_diff = B - B_est
+            C_diff = C - C_est
             row = [
                     iter,
                     str(A_diff),
