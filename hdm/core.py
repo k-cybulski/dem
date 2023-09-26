@@ -63,22 +63,34 @@ def weave_gen(matr):
     return matr.reshape((matr.shape[0] * matr.shape[1], 1))
 
 
-def iterate_generalized(y, dt, p, p_comp=None):
+def iterate_generalized(y, dt, p, p_comp=None, p_pad=None):
     """
     Generate approximate vectors of y in generalized coordinates from a
-    timeseries of y. The vectors are of size p + 1 (p derivatives and 1 value
-    at midpoint).
+    timeseries of y. The vectors are of size m * (p + 1), corresponding to
+    m variables * (p derivatives + 1 value at midpoint).
 
-    y is expected to have each column as one timeseries/one coordinate.
-
-    To improve numerical accuracy, we can compute more derivatives than we
-    return. The greatest derivatives are usually estimated badly, but using a
-    larger Taylor matrix improves approximation. So, p_comp allows to compute
-    more derivatives than are returned, in order to improve the accuracy of
-    those which are returned. [TODO: Is this really true..?]
+    Args:
+        y (torch.Tensor): Timeseries of data, where each column contains the
+            timeseries of one covariate.
+        dt (float): Sampling frequency.
+        p (int): Embedding order in output vectors. The output vectors contain
+            m * (1 + p) values.
+        p_comp (int or None): Embedding order in computed vectors. Must be
+            higher than or equal to p, so that the output vectors are
+            truncated. The idea is that this can improve the estimation
+            accuracy for lower derivatives, without having to include noisy
+            high-level deriatives.
+        p_pad (int or None): If given, pads the output vector with zeros so
+            that its shape is m * (1 + p_pad).
     """
     if p_comp is None:
         p_comp = p
+
+    if p_pad is None:
+        p_pad = p
+
+    assert p_comp >= p
+    assert p_pad >= p
 
     # TODO: vectorize?
     if y.ndim == 1:
@@ -91,7 +103,14 @@ def iterate_generalized(y, dt, p, p_comp=None):
         mat = torch.from_numpy(mat).to(dtype=y.dtype)
 
     for i in range(0, y.shape[0] - p_comp - 1):
-        yield weave_gen((mat @ y[i:(i + p_comp + 1), :])[:(p + 1), :])
+        weaved = weave_gen((mat @ y[i:(i + p_comp + 1), :])[:(p + 1), :])
+        if p_pad > p:
+            diff = p_pad - p
+            if isinstance(weaved, torch.Tensor):
+                weaved = torch.nn.functional.pad(weaved, (0, 0, 0, m * diff))
+            else:
+                weaved = np.pad(weaved, ((0, m * diff), (0, 0)))
+        yield weaved
 
 
 def len_generalized(n, p_comp):
