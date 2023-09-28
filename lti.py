@@ -100,7 +100,7 @@ eta_lambda = torch.tensor(np.zeros(2), dtype=TORCH_DTYPE)
 p_lambda = torch.tensor(np.eye(2) * np.exp(3), dtype=TORCH_DTYPE)
 
 ## Some extras due to my implementation
-v_autocorr = torch.tensor(noise_cov_gen_theoretical(p, sig=noise_temporal_sig, autocorr=autocorr_friston()), dtype=TORCH_DTYPE)
+v_autocorr = torch.tensor(noise_cov_gen_theoretical(d, sig=noise_temporal_sig, autocorr=autocorr_friston()), dtype=TORCH_DTYPE)
 v_autocorr_inv_ = torch.linalg.inv(v_autocorr)
 
 noise_autocorr = torch.tensor(noise_cov_gen_theoretical(p, sig=noise_temporal_sig, autocorr=autocorr_friston()), dtype=TORCH_DTYPE)
@@ -115,7 +115,7 @@ def dem_g(x, v, params):
     C = params[(m_x * m_x + m_x * m_v):(m_x * m_x + m_x * m_v + m_y * m_x)].reshape((m_y, m_x))
     return torch.matmul(C, x)
 
-dem_input = DEMInput(dt=dt, m_x=m_x, m_v=m_v, m_y=m_y, p=p, d=d,
+dem_input = DEMInput(dt=dt, m_x=m_x, m_v=m_v, m_y=m_y, p=p, d=d, d_comp=p,
                      ys=torch.tensor(ys, dtype=TORCH_DTYPE),
                      eta_v=torch.tensor(vs, dtype=TORCH_DTYPE),
                      p_v=p_v,

@@ -38,13 +38,16 @@ def generalized_func(func, mu_x_tildes, mu_v_tildes, m_x, m_v, p, params):
 
 
 def internal_energy_dynamic(
-        g, f, mu_x_tildes, mu_v_tildes, y_tildes, m_x, m_v, p, mu_theta, eta_v_tildes, p_v_tildes,
+        g, f, mu_x_tildes, mu_v_tildes, y_tildes, m_x, m_v, p, d, mu_theta, eta_v_tildes, p_v_tildes,
         mu_lambda, omega_w, omega_z, noise_autocorr_inv, diagnostic=False):
     dtype = mu_theta.dtype # all required variables should have the same dtype at this point
     deriv_mat_x = torch.from_numpy(deriv_mat(p, m_x)).to(dtype=dtype)
     def _int_eng_dynamic(mu_x_tildes, mu_v_tildes, mu_theta, mu_lambda, diagnostic=False):
-        g_tildes = generalized_func(g, mu_x_tildes, mu_v_tildes, m_x, m_v, p, mu_theta)
-        f_tildes = generalized_func(f, mu_x_tildes, mu_v_tildes, m_x, m_v, p, mu_theta)
+        # Need to pad v_tilde with zeros to account for difference between
+        # state embedding number `p` and causes embedding number `d`.
+        mu_v_tildes_pad = torch.nn.functional.pad(mu_v_tildes, (0, 0, 0, p - d, 0, 0))
+        g_tildes = generalized_func(g, mu_x_tildes, mu_v_tildes_pad, m_x, m_v, p, mu_theta)
+        f_tildes = generalized_func(f, mu_x_tildes, mu_v_tildes_pad, m_x, m_v, p, mu_theta)
         err_y = y_tildes - g_tildes
         err_v = mu_v_tildes - eta_v_tildes
         err_x = torch.matmul(deriv_mat_x, mu_x_tildes) - f_tildes
@@ -112,7 +115,7 @@ def internal_action(
 
         # for dynamic internal energies
         g, f,
-        m_x, m_v, p,
+        m_x, m_v, p, d,
 
         mu_x_tildes, mu_v_tildes,
         sig_x_tildes, sig_v_tildes,
@@ -134,7 +137,7 @@ def internal_action(
         compute_dds=True
     )
     u_t, u_t_x_tilde_dds, u_t_v_tilde_dds, u_t_theta_dd, u_t_lambda_dd = internal_energy_dynamic(
-        g, f, mu_x_tildes, mu_v_tildes, y_tildes, m_x, m_v, p, mu_theta, eta_v_tildes, p_v_tildes,
+        g, f, mu_x_tildes, mu_v_tildes, y_tildes, m_x, m_v, p, d, mu_theta, eta_v_tildes, p_v_tildes,
         mu_lambda, omega_w, omega_z, noise_autocorr_inv)
     u += torch.sum(u_t)
     return u, u_theta_dd, u_lambda_dd, u_t_x_tilde_dds, u_t_v_tilde_dds
@@ -149,7 +152,8 @@ def free_action(
         m_x, m_v,
 
         # how many derivatives are we tracking in generalised vectors?
-        p,
+        p, # for states
+        d, # for causes
 
         # dynamic terms
         mu_x_tildes, mu_v_tildes, # iterator of state and input mean estimates in generalized coordinates
@@ -215,7 +219,7 @@ def free_action(
 
     # Dynamic terms of free action that vary with time
     out = internal_energy_dynamic(
-        g, f, mu_x_tildes, mu_v_tildes, y_tildes, m_x, m_v, p, mu_theta, eta_v_tildes, p_v_tildes,
+        g, f, mu_x_tildes, mu_v_tildes, y_tildes, m_x, m_v, p, d, mu_theta, eta_v_tildes, p_v_tildes,
         mu_lambda, omega_w, omega_z, noise_autocorr_inv, diagnostic=diagnostic)
     if diagnostic:
         u_t, u_t_x_tilde_dd, u_t_v_tilde_dd, u_t_theta_dd, u_t_lambda_dd, extr_dt = out
@@ -335,7 +339,7 @@ class DEMInput:
         if self.y_tildes is None:
             self.y_tildes = torch.stack(list(iterate_generalized(self.ys, self.dt, self.p, p_comp=self.p_comp)))
         if self.eta_v_tildes is None:
-            self.eta_v_tildes = torch.stack(list(iterate_generalized(self.eta_v, self.dt, self.d, p_comp=self.d_comp, p_pad=self.p)))
+            self.eta_v_tildes = torch.stack(list(iterate_generalized(self.eta_v, self.dt, self.d, p_comp=self.d_comp)))
         if self.p_v_tildes is None:
             p_v_tilde = kron(self.v_autocorr_inv, self.p_v)
             self.p_v_tildes = p_v_tilde.expand(len(self.eta_v_tildes), *p_v_tilde.shape)
@@ -400,6 +404,7 @@ class DEMState:
             m_x=state.input.m_x,
             m_v=state.input.m_v,
             p=state.input.p,
+            d=state.input.d,
             mu_x_tildes=state.mu_x_tildes,
             mu_v_tildes=state.mu_v_tildes,
             sig_x_tildes=state.sig_x_tildes,
@@ -441,6 +446,7 @@ class DEMState:
                 m_x=state.input.m_x,
                 m_v=state.input.m_v,
                 p=state.input.p,
+                d=state.input.d,
 
                 mu_x_tildes=state.mu_x_tildes,
                 mu_v_tildes=state.mu_v_tildes,
@@ -499,7 +505,7 @@ def dem_step_d(state: DEMState, lr):
     mu_x_tildes = [mu_x_tilde_t]
     mu_v_tildes = [mu_v_tilde_t]
     deriv_mat_x = torch.from_numpy(deriv_mat(state.input.p, state.input.m_x)).to(dtype=state.input.dtype)
-    deriv_mat_v = torch.from_numpy(deriv_mat(state.input.p, state.input.m_v)).to(dtype=state.input.dtype)
+    deriv_mat_v = torch.from_numpy(deriv_mat(state.input.d, state.input.m_v)).to(dtype=state.input.dtype)
     for t, (y_tilde,
          sig_x_tilde, sig_v_tilde,
          eta_v_tilde, p_v_tilde) in tqdm(enumerate(zip(
@@ -518,6 +524,7 @@ def dem_step_d(state: DEMState, lr):
                 m_x=state.input.m_x,
                 m_v=state.input.m_v,
                 p=state.input.p,
+                d=state.input.d,
                 mu_x_tildes=mu_x_tilde_t[None],
                 mu_v_tildes=mu_v_tilde_t[None],
                 sig_x_tildes=sig_x_tilde[None],
