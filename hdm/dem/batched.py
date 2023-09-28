@@ -40,8 +40,10 @@ def generalized_func(func, mu_x_tildes, mu_v_tildes, m_x, m_v, p, params):
 def internal_energy_dynamic(
         g, f, mu_x_tildes, mu_v_tildes, y_tildes, m_x, m_v, p, d, mu_theta, eta_v_tildes, p_v_tildes,
         mu_lambda, omega_w, omega_z, noise_autocorr_inv, diagnostic=False):
-    dtype = mu_theta.dtype # all required variables should have the same dtype at this point
-    deriv_mat_x = torch.from_numpy(deriv_mat(p, m_x)).to(dtype=dtype)
+    # all required variables should have the same dtype and device at this point
+    dtype = mu_theta.dtype
+    device = mu_theta.device
+    deriv_mat_x = torch.from_numpy(deriv_mat(p, m_x)).to(dtype=dtype, device=device)
     def _int_eng_dynamic(mu_x_tildes, mu_v_tildes, mu_theta, mu_lambda, diagnostic=False):
         # Need to pad v_tilde with zeros to account for difference between
         # state embedding number `p` and causes embedding number `d`.
@@ -264,13 +266,15 @@ def free_action(
     else:
         return f_bar
 
-def _verify_attr_dtypes(parent, attributes, dtype):
+def _verify_attr_dtypes(parent, attributes, dtype, device):
     for attr in attributes:
         obj = getattr(parent, attr)
         if not isinstance(obj, torch.Tensor):
             raise ValueError(f"{attr} must be a torch.Tensor")
         if obj.dtype != dtype:
             raise ValueError(f"{attr} must be of dtype {dtype}")
+        if obj.device != device:
+            raise ValueError(f"{attr} must be on device {device}")
 
 @dataclass
 class DEMInput:
@@ -320,8 +324,9 @@ class DEMInput:
     eta_v_tildes: torch.Tensor = None
     p_v_tildes: torch.Tensor = None
 
-    # Numeric precision
+    # Torch tensor attributes
     dtype: torch.dtype = None
+    device: torch.device = None
 
     # Compute larger embeddings to truncate them?
     p_comp: int = None # >= p
@@ -345,6 +350,8 @@ class DEMInput:
             self.p_v_tildes = p_v_tilde.expand(len(self.eta_v_tildes), *p_v_tilde.shape)
         if self.dtype is None:
             self.dtype = self.ys.dtype
+        if self.device is None:
+            self.device = self.ys.device
         _verify_attr_dtypes(self, [
             "ys",
             "eta_v",
@@ -357,7 +364,7 @@ class DEMInput:
             "omega_w",
             "omega_z",
             "noise_autocorr_inv"
-        ], self.dtype)
+        ], self.dtype, self.device)
 
 @dataclass
 class DEMState:
@@ -396,7 +403,7 @@ class DEMState:
             "sig_lambda",
             "mu_x0_tilde",
             "mu_v0_tilde"
-        ], dtype=self.input.dtype)
+        ], dtype=self.input.dtype, device=self.input.device)
 
     def free_action(self, skip_constant=False, diagnostic=False):
         state = self
@@ -464,7 +471,7 @@ class DEMState:
         x0 = x0.reshape(-1)
         assert len(x0) == input.m_x
 
-        mu_x0_tilde = torch.concat([x0, torch.zeros(input.p * input.m_x)]).reshape((-1, 1))
+        mu_x0_tilde = torch.concat([x0, torch.zeros(input.p * input.m_x, dtype=input.dtype, device=input.device)]).reshape((-1, 1))
         mu_v_tildes = input.eta_v_tildes.clone().detach()
 
         # TODO: What is a good value here?
@@ -472,7 +479,7 @@ class DEMState:
         # sig_x_tildes = _autocorr_inv(input.p, input.dt * 3).repeat(len(mu_v_tildes), 1, 1)
         # the noise autocorrelation structure given should be in some way
         # approximately ok for the xs as well...
-        sig_x_tildes = kron(input.noise_autocorr_inv, torch.eye(input.m_x)).repeat(len(mu_v_tildes), 1, 1)
+        sig_x_tildes = kron(input.noise_autocorr_inv, torch.eye(input.m_x, dtype=input.dtype, device=input.device)).repeat(len(mu_v_tildes), 1, 1)
 
         if mu_theta is None:
             mu_theta=input.eta_theta.clone().detach()
@@ -504,8 +511,8 @@ def dem_step_d(state: DEMState, lr):
     mu_v_tilde_t = state.mu_v0_tilde.detach()
     mu_x_tildes = [mu_x_tilde_t]
     mu_v_tildes = [mu_v_tilde_t]
-    deriv_mat_x = torch.from_numpy(deriv_mat(state.input.p, state.input.m_x)).to(dtype=state.input.dtype)
-    deriv_mat_v = torch.from_numpy(deriv_mat(state.input.d, state.input.m_v)).to(dtype=state.input.dtype)
+    deriv_mat_x = torch.from_numpy(deriv_mat(state.input.p, state.input.m_x)).to(dtype=state.input.dtype, device=state.input.device)
+    deriv_mat_v = torch.from_numpy(deriv_mat(state.input.d, state.input.m_v)).to(dtype=state.input.dtype, device=state.input.device)
     for t, (y_tilde,
          sig_x_tilde, sig_v_tilde,
          eta_v_tilde, p_v_tilde) in tqdm(enumerate(zip(
@@ -560,8 +567,8 @@ def dem_step_d(state: DEMState, lr):
         v_dd = lr * torch.autograd.functional.hessian(lambda mu: dynamic_free_energy(mu_x_tilde_t, mu), mu_v_tilde_t)
         x_dd = deriv_mat_x + _fix_grad_shape(x_dd)
         v_dd = deriv_mat_v + _fix_grad_shape(v_dd)
-        step_matrix_x = (torch.matrix_exp(x_dd * state.input.dt) - torch.eye(x_dd.shape[0])) @ torch.linalg.inv(x_dd)
-        step_matrix_v = (torch.matrix_exp(v_dd * state.input.dt) - torch.eye(v_dd.shape[0])) @ torch.linalg.inv(v_dd)
+        step_matrix_x = (torch.matrix_exp(x_dd * state.input.dt) - torch.eye(x_dd.shape[0], dtype=state.input.dtype, device=state.input.device)) @ torch.linalg.inv(x_dd)
+        step_matrix_v = (torch.matrix_exp(v_dd * state.input.dt) - torch.eye(v_dd.shape[0], dtype=state.input.dtype, device=state.input.device)) @ torch.linalg.inv(v_dd)
         mu_x_tilde_t = mu_x_tilde_t + step_matrix_x @ x_d
         mu_v_tilde_t = mu_v_tilde_t + step_matrix_v @ v_d
         mu_x_tildes.append(mu_x_tilde_t.detach())
@@ -598,7 +605,7 @@ def dem_step_m(state: DEMState, lr_lambda, iter_lambda, min_improv):
         f_bar = state.free_action()
         lambda_d = lr_lambda * torch.autograd.grad(f_bar, state.mu_lambda)[0]
         lambda_dd = lr_lambda * torch.autograd.functional.hessian(lambda_free_action, state.mu_lambda)
-        step_matrix = (torch.matrix_exp(lambda_dd) - torch.eye(lambda_dd.shape[0])) @ torch.linalg.inv(lambda_dd)
+        step_matrix = (torch.matrix_exp(lambda_dd) - torch.eye(lambda_dd.shape[0], dtype=state.input.dtype, device=state.input.device)) @ torch.linalg.inv(lambda_dd)
         state.mu_lambda = state.mu_lambda + step_matrix @ lambda_d
         # convergence check
         if last_f_bar is not None:
@@ -619,7 +626,7 @@ def dem_step_e(state: DEMState, lr_theta):
     f_bar = state.free_action()
     theta_d = lr_theta * torch.autograd.grad(f_bar, state.mu_theta)[0]
     theta_dd = lr_theta * torch.autograd.functional.hessian(theta_free_action, state.mu_theta)
-    step_matrix = (torch.matrix_exp(theta_dd) - torch.eye(theta_dd.shape[0])) @ torch.linalg.inv(theta_dd)
+    step_matrix = (torch.matrix_exp(theta_dd) - torch.eye(theta_dd.shape[0], dtype=state.input.dtype, device=state.input.device)) @ torch.linalg.inv(theta_dd)
     state.mu_theta = state.mu_theta + step_matrix @ theta_d
 
 

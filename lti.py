@@ -82,28 +82,29 @@ def ABC_from_params(params):
     return A, B, C
 
 TORCH_DTYPE = torch.float64
+TORCH_DEVICE = 'cuda:0'
 
 # Anil Meera & Wisse use 32, but that seems way too high for our algorithm to work well
-known_value_exp = 32
+known_value_exp = 20
 
 true_params = np.concatenate([A.reshape(-1), B.reshape(-1), C.reshape(-1)])
 
 # Priors for estimation
-p_v = torch.tensor(np.exp(known_value_exp), dtype=TORCH_DTYPE).reshape((1,1))
-eta_v = torch.tensor(vs, dtype=TORCH_DTYPE)
+p_v = torch.tensor(np.exp(known_value_exp), dtype=TORCH_DTYPE, device=TORCH_DEVICE).reshape((1,1))
+eta_v = torch.tensor(vs, dtype=TORCH_DTYPE, device=TORCH_DEVICE)
 
-eta_theta = torch.tensor(np.concatenate([rng.uniform(-2, 2, m_x * m_x + m_x * m_v), C.reshape(-1)]), dtype=TORCH_DTYPE)
-p_theta_diag = torch.tensor(np.concatenate([np.full(m_x * m_x + m_x * m_v, np.exp(6)), np.full(m_y * m_x, np.exp(known_value_exp))]), dtype=TORCH_DTYPE)
-p_theta = torch.tensor(np.diag(p_theta_diag), dtype=TORCH_DTYPE)
+eta_theta = torch.tensor(np.concatenate([rng.uniform(-2, 2, m_x * m_x + m_x * m_v), C.reshape(-1)]), dtype=TORCH_DTYPE, device=TORCH_DEVICE)
+p_theta_diag = torch.tensor(np.concatenate([np.full(m_x * m_x + m_x * m_v, np.exp(6)), np.full(m_y * m_x, np.exp(known_value_exp))]), dtype=TORCH_DTYPE, device=TORCH_DEVICE)
+p_theta = torch.tensor(torch.diag(p_theta_diag), dtype=TORCH_DTYPE, device=TORCH_DEVICE)
 
-eta_lambda = torch.tensor(np.zeros(2), dtype=TORCH_DTYPE)
-p_lambda = torch.tensor(np.eye(2) * np.exp(3), dtype=TORCH_DTYPE)
+eta_lambda = torch.tensor(np.zeros(2), dtype=TORCH_DTYPE, device=TORCH_DEVICE)
+p_lambda = torch.tensor(np.eye(2) * np.exp(3), dtype=TORCH_DTYPE, device=TORCH_DEVICE)
 
 ## Some extras due to my implementation
-v_autocorr = torch.tensor(noise_cov_gen_theoretical(d, sig=noise_temporal_sig, autocorr=autocorr_friston()), dtype=TORCH_DTYPE)
+v_autocorr = torch.tensor(noise_cov_gen_theoretical(d, sig=noise_temporal_sig, autocorr=autocorr_friston()), dtype=TORCH_DTYPE, device=TORCH_DEVICE)
 v_autocorr_inv_ = torch.linalg.inv(v_autocorr)
 
-noise_autocorr = torch.tensor(noise_cov_gen_theoretical(p, sig=noise_temporal_sig, autocorr=autocorr_friston()), dtype=TORCH_DTYPE)
+noise_autocorr = torch.tensor(noise_cov_gen_theoretical(p, sig=noise_temporal_sig, autocorr=autocorr_friston()), dtype=TORCH_DTYPE, device=TORCH_DEVICE)
 noise_autocorr_inv_ = torch.linalg.inv(noise_autocorr)
 
 def dem_f(x, v, params):
@@ -116,8 +117,8 @@ def dem_g(x, v, params):
     return torch.matmul(C, x)
 
 dem_input = DEMInput(dt=dt, m_x=m_x, m_v=m_v, m_y=m_y, p=p, d=d, d_comp=p,
-                     ys=torch.tensor(ys, dtype=TORCH_DTYPE),
-                     eta_v=torch.tensor(vs, dtype=TORCH_DTYPE),
+                     ys=torch.tensor(ys, dtype=TORCH_DTYPE, device=TORCH_DEVICE),
+                     eta_v=torch.tensor(vs, dtype=TORCH_DTYPE, device=TORCH_DEVICE),
                      p_v=p_v,
                      v_autocorr_inv=v_autocorr_inv_,
                      eta_theta=eta_theta,
@@ -127,10 +128,10 @@ dem_input = DEMInput(dt=dt, m_x=m_x, m_v=m_v, m_y=m_y, p=p, d=d, d_comp=p,
                      f=dem_f,
                      g=dem_g,
                      noise_autocorr_inv=noise_autocorr_inv_,
-                     omega_w=torch.eye(m_x, dtype=TORCH_DTYPE),
-                     omega_z=torch.eye(m_y, dtype=TORCH_DTYPE))
+                     omega_w=torch.eye(m_x, dtype=TORCH_DTYPE, device=TORCH_DEVICE),
+                     omega_z=torch.eye(m_y, dtype=TORCH_DTYPE, device=TORCH_DEVICE))
 
-dem_state = DEMState.from_input(dem_input, torch.tensor(x0, dtype=TORCH_DTYPE))
+dem_state = DEMState.from_input(dem_input, torch.tensor(x0, dtype=TORCH_DTYPE, device=TORCH_DEVICE))
 
 # Let's see if it works
 dem_step_d(dem_state, 1)
@@ -155,8 +156,8 @@ iter_lambda = 8 # from the matlab code
 m_min_improv = 0.01
 num_iter = 50
 
-trajectories = [[np.array(v) for v in extract_dynamic(dem_state)]]
-param_estimates = [dem_state.mu_theta.clone().detach().numpy()]
+trajectories = [[np.array(v.cpu()) for v in extract_dynamic(dem_state)]]
+param_estimates = [dem_state.mu_theta.clone().detach().cpu().numpy()]
 f_bars = []
 f_bar_diagnostics = []
 
@@ -195,11 +196,12 @@ def print_parameter_comparison(A, B, C, mu_thetas):
 
 for i in tqdm(range(num_iter), desc="Running DEM..."):
     dem_step(dem_state, lr_dynamic, lr_theta, lr_lambda, iter_lambda, m_min_improv=m_min_improv)
-    param_estimates.append(dem_state.mu_theta.clone().detach().numpy())
-    trajectories.append([np.array(v) for v in extract_dynamic(dem_state)])
+    param_estimates.append(dem_state.mu_theta.clone().detach().cpu().numpy())
+    trajectories.append([np.array(v.cpu()) for v in extract_dynamic(dem_state)])
     f_bar, extr = dem_state.free_action(diagnostic=True)
 
-    f_bars.append(f_bar)
+    f_bars.append(f_bar.detach().cpu().item())
+    extr = { key: item.detach().cpu() for key, item in extr.items()}
     f_bar_diagnostics.append(extr)
 
     with open(OUTPUT_DIR / f'traj{i:02}.pkl', 'wb') as file_:
