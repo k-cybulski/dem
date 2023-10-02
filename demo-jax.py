@@ -559,33 +559,3 @@ for i in tqdm(range(num_iter), desc="Running DEM..."):
     print(tabulate([(key, *item) for key, item in pdict.items()], headers=('variable', 'norm', 'max', 'min'), floatfmt='.3f'))
     print_convergence_table(A, B, C, param_estimates, f_bars)
     print(tabulate(times, headers='keys', floatfmt='.3f'))
-
-
-### FOR COMPARISON WITH TORCH
-
-# Check equivalence between torch and jax outputs
-def f_torch(x, v, params):
-    A = params[0:(m_x * m_x)].reshape((m_x, m_x))
-    B = params[(m_x * m_x):(m_x * m_x + m_x * m_v)].reshape((m_x, m_v))
-    return torch.matmul(A, x) + torch.matmul(B, v)
-
-def g_torch(x, v, params):
-    C = params[(m_x * m_x + m_x * m_v):(m_x * m_x + m_x * m_v + m_y * m_x)].reshape((m_y, m_x))
-    return torch.matmul(C, x)
-
-x_tildes_t = torch.stack(list(iterate_generalized(torch.from_numpy(xs), dt, p)))
-v_tildes_t = torch.stack(list(iterate_generalized(torch.from_numpy(vs), dt, p)))
-
-params_t = torch.from_numpy(true_params).to(dtype=torch.float64)
-
-f_tildes_t = generalized_func_torch(f_torch, x_tildes_t, v_tildes_t, m_x, m_v, p, params_t)
-g_tildes_t = generalized_func_torch(g_torch, x_tildes_t, v_tildes_t, m_x, m_v, p, params_t)
-
-## SCRIB
-func = f_torch
-params = params_t
-mu_x_tildes = x_tildes
-mu_v_tildes = v_tildes
-mu_x_tilde = mu_x_tildes[0]
-mu_v_tilde = mu_v_tildes[0]
-## END SCRIB

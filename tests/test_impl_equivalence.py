@@ -151,7 +151,7 @@ def test_equivalence_jax_batched():
     true_params = np.concatenate([A.reshape(-1), B.reshape(-1), C.reshape(-1)])
 
     # JAX doesn't seem to be able to support a value as high as 20
-    known_value_exp = 6
+    known_value_exp = 20
 
 
     ######### Utils
