@@ -277,7 +277,7 @@ def _verify_attr_dtypes(parent, attributes, dtype, device):
             raise ValueError(f"{attr} must be on device {device}")
 
 @dataclass
-class DEMInput:
+class DEMInputBatched:
     """
     The input to DEM. It consists of data, priors, starting values, and
     transition functions. It consists of all the things which remain fixed over
@@ -344,7 +344,7 @@ class DEMInput:
         if self.y_tildes is None:
             self.y_tildes = torch.stack(list(iterate_generalized(self.ys, self.dt, self.p, p_comp=self.p_comp)))
         if self.eta_v_tildes is None:
-            self.eta_v_tildes = torch.stack(list(iterate_generalized(self.eta_v, self.dt, self.d, p_comp=self.d_comp)))
+            self.eta_v_tildes = torch.stack(list(iterate_generalized(self.eta_v, self.dt, self.d, p_comp=self.p_comp)))
         if self.p_v_tildes is None:
             p_v_tilde = kron(self.v_autocorr_inv, self.p_v)
             self.p_v_tildes = p_v_tilde.expand(len(self.eta_v_tildes), *p_v_tilde.shape)
@@ -367,13 +367,13 @@ class DEMInput:
         ], self.dtype, self.device)
 
 @dataclass
-class DEMState:
+class DEMStateBatched:
     """
     Keeps track of the current state of a DEM model. Contains its state,
     parameter, and hyperparameter estimates.
     """
     # system input
-    input: DEMInput
+    input: DEMInputBatched
 
     # dynamic state estimates
     mu_x_tildes: torch.Tensor
@@ -467,7 +467,7 @@ class DEMState:
                 noise_autocorr_inv=state.input.noise_autocorr_inv)
 
     @classmethod
-    def from_input(cls, input: DEMInput, x0: torch.Tensor,  mu_theta: torch.Tensor=None, **kwargs):
+    def from_input(cls, input: DEMInputBatched, x0: torch.Tensor,  mu_theta: torch.Tensor=None, **kwargs):
         x0 = x0.reshape(-1)
         assert len(x0) == input.m_x
 
@@ -502,7 +502,7 @@ class DEMState:
         return cls(**kwargs)
 
 
-def dem_step_d(state: DEMState, lr):
+def dem_step_d(state: DEMStateBatched, lr):
     """
     Performs the D step of DEM.
     """
@@ -579,7 +579,7 @@ def dem_step_d(state: DEMState, lr):
     state.mu_v_tildes = torch.stack(mu_v_tildes)
 
 
-def dem_step_precision(state: DEMState):
+def dem_step_precision(state: DEMStateBatched):
     """
     Does a precision update of DEM.
     """
@@ -591,7 +591,7 @@ def dem_step_precision(state: DEMState):
     state.sig_v_tildes = torch.stack([-torch.linalg.inv(u_t_v_tilde_dd) for u_t_v_tilde_dd in u_t_v_tilde_dds])
 
 
-def dem_step_m(state: DEMState, lr_lambda, iter_lambda, min_improv):
+def dem_step_m(state: DEMStateBatched, lr_lambda, iter_lambda, min_improv):
     """
     Performs the noise hyperparameter update (step M) of DEM.
     """
@@ -614,7 +614,7 @@ def dem_step_m(state: DEMState, lr_lambda, iter_lambda, min_improv):
         last_f_bar = f_bar.clone().detach()
 
 
-def dem_step_e(state: DEMState, lr_theta):
+def dem_step_e(state: DEMStateBatched, lr_theta):
     """
     Performs the parameter update (step E) of DEM.
     """
@@ -630,7 +630,7 @@ def dem_step_e(state: DEMState, lr_theta):
     state.mu_theta = state.mu_theta + step_matrix @ theta_d
 
 
-def dem_step(state: DEMState, lr_dynamic, lr_theta, lr_lambda, iter_lambda, m_min_improv=0.01):
+def dem_step(state: DEMStateBatched, lr_dynamic, lr_theta, lr_lambda, iter_lambda, m_min_improv=0.01):
     """
     Does an iteration of DEM.
     """
