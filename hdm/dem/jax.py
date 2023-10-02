@@ -885,7 +885,7 @@ def jacrev_low_memory(f, batch_size):
     A low-memory but slower version of jacrev. In contrast to standard jacrev,
     it computes the jacobian in batches.
     """
-    # this is slow, but takes less memory
+    # this is slow, but takes less memory than the default method by not computing *everything* in parallel
     def jacfun(x):
         # y, jac = jax.vmap(pushfwd, out_axes=(None, 1))((basis,))
         y, vjp_fun = vjp(f, x)
@@ -912,63 +912,118 @@ def jacfwd_low_memory(f, batch_size):
         return jnp.transpose(Jt)
     return jacfun
 
-def hessian_low_memory(f, batch_size, outer=jacfwd_low_memory):
-    return outer(jacrev(f), batch_size=batch_size)
-
-def jacfwd_low_memory_jittable(f, batch_size):
+def jacfwd_low_memory_jit(f):
+    # The batching mechanism used in low_memory functions above relies upon
+    # dynamically sized slicing of jnp.eye, but JAX does not support dynamic
+    # slices for jit compiled functions. Also it's not possible to call jnp.eye
+    # with a dynamic integer input either.
     def jacfun(x):
         _jvp = lambda s: jvp(f, (x,), (s,))[1]
         basis = jnp.eye(x.size, dtype=x.dtype)
-        num_batches = jnp.ceil(x.size / batch_size).astype(int)
-        Jinit = jnp.empty((num_batches, batch_size, x.size))
         def body_loop(i, J):
-            batch = jnp.eye(batch_size, x.size, k=(batch_size * i), dtype=x.dtype)
-            return J
-            Jtmp = vmap(_jvp)(batch)
+            basis_vec = basis[i]
+            Jtmp = _jvp(basis_vec)
             return J.at[i].set(Jtmp)
-        Jtr = fori_loop(0, num_batches, body_loop, Jinit)
-        Jt = jnp.concatenate(Jtr[0:x.size])
+        Jinit = jnp.empty((x.size, x.size))
+        Jt = fori_loop(0, x.size, body_loop, Jinit)
         return jnp.transpose(Jt)
     return jacfun
 
-def dem_step_e(state: DEMStateJAX, lr_theta, hessian_batch_size=3):
+def hessian_low_memory(f, outer=partial(jacfwd_low_memory, batch_size=3)):
+    return outer(jacrev(f))
+
+def hessian_low_memory_jit(f):
+    # just a special case of hessian_low_memory to ensure JIT-compatibility
+    return jacfwd_low_memory_jit(jacrev(f))
+
+@partial(jit, static_argnames=('m_x', 'm_v', 'p', 'd', 'gen_func_f', 'gen_func_g'))
+def _theta_update(m_x,
+                  m_v,
+                  p,
+                  d,
+                  mu_x_tildes,
+                  mu_v_tildes,
+                  sig_x_tildes,
+                  sig_v_tildes,
+                  y_tildes,
+                  eta_v_tildes,
+                  p_v_tildes,
+                  eta_theta,
+                  eta_lambda,
+                  p_theta,
+                  p_lambda,
+                  mu_theta,
+                  mu_lambda,
+                  sig_theta,
+                  sig_lambda,
+                  gen_func_g,
+                  gen_func_f,
+                  omega_w,
+                  omega_z,
+                  noise_autocorr_inv, lr_theta):
+    def theta_free_action(mu_theta):
+        return free_action(
+                    m_x=m_x,
+                    m_v=m_v,
+                    p=p,
+                    d=d,
+                    mu_x_tildes=mu_x_tildes,
+                    mu_v_tildes=mu_v_tildes,
+                    sig_x_tildes=sig_x_tildes,
+                    sig_v_tildes=sig_v_tildes,
+                    y_tildes=y_tildes,
+                    eta_v_tildes=eta_v_tildes,
+                    p_v_tildes=p_v_tildes,
+                    eta_theta=eta_theta,
+                    eta_lambda=eta_lambda,
+                    p_theta=p_theta,
+                    p_lambda=p_lambda,
+                    mu_theta=mu_theta,
+                    mu_lambda=mu_lambda,
+                    sig_theta=sig_theta,
+                    sig_lambda=sig_lambda,
+                    gen_func_g=gen_func_g,
+                    gen_func_f=gen_func_f,
+                    omega_w=omega_w,
+                    omega_z=omega_z,
+                    noise_autocorr_inv=noise_autocorr_inv,
+                    skip_constant=False)
+    theta_d_raw = grad(theta_free_action)(mu_theta)
+    theta_d = lr_theta * theta_d_raw
+    theta_dd = lr_theta * hessian_low_memory_jit(theta_free_action)(mu_theta)
+    step_matrix = (jsp.linalg.expm(theta_dd, max_squarings=MATRIX_EXPM_MAX_SQUARINGS) - jnp.eye(theta_dd.shape[0], dtype=mu_theta.dtype)) @ jnp.linalg.inv(theta_dd)
+    return mu_theta + step_matrix @ theta_d
+
+
+def dem_step_e(state: DEMStateJAX, lr_theta, hess_func=hessian_low_memory):
     """
     Performs the parameter update (step E) of DEM.
     """
+    state.mu_theta = _theta_update(m_x=state.input.m_x,
+                  m_v=state.input.m_v,
+                  p=state.input.p,
+                  d=state.input.d,
+                  mu_x_tildes=state.mu_x_tildes,
+                  mu_v_tildes=state.mu_v_tildes,
+                  sig_x_tildes=state.sig_x_tildes,
+                  sig_v_tildes=state.sig_v_tildes,
+                  y_tildes=state.input.y_tildes,
+                  eta_v_tildes=state.input.eta_v_tildes,
+                  p_v_tildes=state.input.p_v_tildes,
+                  eta_theta=state.input.eta_theta,
+                  eta_lambda=state.input.eta_lambda,
+                  p_theta=state.input.p_theta,
+                  p_lambda=state.input.p_lambda,
+                  mu_theta=state.mu_theta,
+                  mu_lambda=state.mu_lambda,
+                  sig_theta=state.sig_theta,
+                  sig_lambda=state.sig_lambda,
+                  gen_func_g=state.input.gen_func_g,
+                  gen_func_f=state.input.gen_func_f,
+                  omega_w=state.input.omega_w,
+                  omega_z=state.input.omega_z,
+                  noise_autocorr_inv=state.input.noise_autocorr_inv, lr_theta=lr_theta)
     # TODO: should be an if statement comparing new f_bar with old
-    def theta_free_action(mu_theta):
-        # free action as a function of theta
-        return free_action(
-                    m_x=state.input.m_x,
-                    m_v=state.input.m_v,
-                    p=state.input.p,
-                    d=state.input.d,
-                    mu_x_tildes=state.mu_x_tildes,
-                    mu_v_tildes=state.mu_v_tildes,
-                    sig_x_tildes=state.sig_x_tildes,
-                    sig_v_tildes=state.sig_v_tildes,
-                    y_tildes=state.input.y_tildes,
-                    eta_v_tildes=state.input.eta_v_tildes,
-                    p_v_tildes=state.input.p_v_tildes,
-                    eta_theta=state.input.eta_theta,
-                    eta_lambda=state.input.eta_lambda,
-                    p_theta=state.input.p_theta,
-                    p_lambda=state.input.p_lambda,
-                    mu_theta=mu_theta,
-                    mu_lambda=state.mu_lambda,
-                    sig_theta=state.sig_theta,
-                    sig_lambda=state.sig_lambda,
-                    gen_func_g=state.input.gen_func_g,
-                    gen_func_f=state.input.gen_func_f,
-                    omega_w=state.input.omega_w,
-                    omega_z=state.input.omega_z,
-                    noise_autocorr_inv=state.input.noise_autocorr_inv,
-                    skip_constant=False)
-    theta_d_raw = grad(theta_free_action)(state.mu_theta)
-    theta_d = lr_theta * theta_d_raw
-    theta_dd = lr_theta * hessian_low_memory(theta_free_action, batch_size=hessian_batch_size)(state.mu_theta)
-    step_matrix = (jsp.linalg.expm(theta_dd, max_squarings=MATRIX_EXPM_MAX_SQUARINGS) - jnp.eye(theta_dd.shape[0], dtype=state.input.dtype)) @ jnp.linalg.inv(theta_dd)
-    state.mu_theta = state.mu_theta + step_matrix @ theta_d
 
 def dem_step(state: DEMStateJAX, lr_dynamic, lr_theta, lr_lambda, iter_lambda, m_min_improv=0.01):
     """
