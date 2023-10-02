@@ -11,7 +11,7 @@ import numpy as np
 import jax.numpy as jnp
 import jax.scipy as jsp
 from jax import jacfwd, vmap, hessian, grad, value_and_grad, jit, jacrev, vjp, jvp
-from jax.lax import fori_loop
+from jax.lax import fori_loop, while_loop
 from math import ceil
 
 from ..noise import autocorr_friston, noise_cov_gen_theoretical
@@ -827,7 +827,6 @@ def dem_step_m(state: DEMStateJAX, lr_lambda, iter_lambda, min_improv):
     """
     Performs the noise hyperparameter update (step M) of DEM.
     """
-    last_f_bar = None
     def lambda_free_action(mu_lambda):
         # free action as a function of lambda
         return free_action(
@@ -856,17 +855,24 @@ def dem_step_m(state: DEMStateJAX, lr_lambda, iter_lambda, min_improv):
                     omega_z=state.input.omega_z,
                     noise_autocorr_inv=state.input.noise_autocorr_inv,
                     skip_constant=False)
-    for i in tqdm(range(iter_lambda), desc="Step M"):
-        f_bar, lambda_d_raw = value_and_grad(lambda_free_action)(state.mu_lambda)
+
+    init_args = (-jnp.inf, -jnp.inf, state.mu_lambda)
+
+    def cond_fun(args):
+        f_bar, last_f_bar, mu_lambda = args
+        return last_f_bar + min_improv <= f_bar
+
+    def body_fun(args):
+        last_f_bar, _, mu_lambda = args
+        f_bar, lambda_d_raw = value_and_grad(lambda_free_action)(mu_lambda)
         lambda_d = lr_lambda * lambda_d_raw
-        lambda_dd = lr_lambda * hessian(lambda_free_action)(state.mu_lambda)
+        lambda_dd = lr_lambda * hessian(lambda_free_action)(mu_lambda)
         step_matrix = (jsp.linalg.expm(lambda_dd, max_squarings=MATRIX_EXPM_MAX_SQUARINGS) - jnp.eye(lambda_dd.shape[0], dtype=state.input.dtype)) @ jnp.linalg.inv(lambda_dd)
-        state.mu_lambda = state.mu_lambda + step_matrix @ lambda_d
-        # convergence check
-        if last_f_bar is not None:
-            if last_f_bar + min_improv > f_bar:
-                break
-        last_f_bar = f_bar.copy()
+        mu_lambda = mu_lambda + step_matrix @ lambda_d
+        return f_bar, last_f_bar, mu_lambda
+
+    f_bar, last_f_bar, mu_lambda = while_loop(cond_fun, body_fun, init_args)
+    state.mu_lambda = mu_lambda
 
 
 # just calling jax.hessian takes incredible amounts of memory,
