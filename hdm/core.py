@@ -63,7 +63,7 @@ def weave_gen(matr):
     return matr.reshape((matr.shape[0] * matr.shape[1], 1))
 
 
-def iterate_generalized(y, dt, p, p_comp=None, p_pad=None):
+def iterate_generalized(y, dt, p, p_comp=None):
     """
     Generate approximate vectors of y in generalized coordinates from a
     timeseries of y. The vectors are of size m * (p + 1), corresponding to
@@ -80,17 +80,11 @@ def iterate_generalized(y, dt, p, p_comp=None, p_pad=None):
             truncated. The idea is that this can improve the estimation
             accuracy for lower derivatives, without having to include noisy
             high-level deriatives.
-        p_pad (int or None): If given, pads the output vector with zeros so
-            that its shape is m * (1 + p_pad).
     """
     if p_comp is None:
         p_comp = p
 
-    if p_pad is None:
-        p_pad = p
-
     assert p_comp >= p
-    assert p_pad >= p
 
     # TODO: vectorize?
     if y.ndim == 1:
@@ -100,16 +94,10 @@ def iterate_generalized(y, dt, p, p_comp=None, p_pad=None):
 
     mat = taylor_mat(p_comp, dt, inv=True)
     if isinstance(y, torch.Tensor):
-        mat = torch.from_numpy(mat).to(dtype=y.dtype)
+        mat = torch.from_numpy(mat).to(dtype=y.dtype, device=y.device)
 
     for i in range(0, y.shape[0] - p_comp - 1):
         weaved = weave_gen((mat @ y[i:(i + p_comp + 1), :])[:(p + 1), :])
-        if p_pad > p:
-            diff = p_pad - p
-            if isinstance(weaved, torch.Tensor):
-                weaved = torch.nn.functional.pad(weaved, (0, 0, 0, m * diff))
-            else:
-                weaved = np.pad(weaved, ((0, m * diff), (0, 0)))
         yield weaved
 
 
