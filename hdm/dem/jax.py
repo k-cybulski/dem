@@ -813,66 +813,185 @@ def dem_step_d(state: DEMStateJAX, lr):
     state.mu_x_tildes = mu_x_tildes
     state.mu_v_tildes = mu_v_tildes
 
+
+@partial(jit, static_argnames=('m_x', 'm_v', 'p', 'd', 'gen_func_f', 'gen_func_g'))
+def _precision_update(
+        mu_theta,
+        mu_lambda,
+        eta_theta,
+        eta_lambda,
+        p_theta,
+        p_lambda,
+        gen_func_f, gen_func_g,
+        m_x, m_v, p, d,
+        mu_x_tildes, mu_v_tildes,
+        sig_x_tildes, sig_v_tildes,
+        y_tildes,
+        eta_v_tildes, p_v_tildes,
+        omega_w, omega_z, noise_autocorr_inv):
+    u, u_theta_dd, u_lambda_dd, u_t_x_tilde_dds, u_t_v_tilde_dds = internal_action(
+                mu_theta=mu_theta,
+                mu_lambda=mu_lambda,
+                eta_theta=eta_theta,
+                eta_lambda=eta_lambda,
+                p_theta=p_theta,
+                p_lambda=p_lambda,
+                gen_func_g=gen_func_g,
+                gen_func_f=gen_func_f,
+                m_x=m_x,
+                m_v=m_v,
+                p=p,
+                d=d,
+                mu_x_tildes=mu_x_tildes,
+                mu_v_tildes=mu_v_tildes,
+                sig_x_tildes=sig_x_tildes,
+                sig_v_tildes=sig_v_tildes,
+                y_tildes=y_tildes,
+                eta_v_tildes=eta_v_tildes,
+                p_v_tildes=p_v_tildes,
+                omega_w=omega_w,
+                omega_z=omega_z,
+                noise_autocorr_inv=noise_autocorr_inv
+            )
+    sig_theta = jnp.linalg.inv(-u_theta_dd)
+    sig_lambda = jnp.linalg.inv(-u_lambda_dd)
+    sig_x_tildes = -jnp.linalg.inv(u_t_x_tilde_dds)
+    sig_v_tildes = -jnp.linalg.inv(u_t_v_tilde_dds)
+    return sig_theta, sig_lambda, sig_x_tildes, sig_v_tildes
+
+
+
 def dem_step_precision(state: DEMStateJAX):
     """
     Does a precision update of DEM.
     """
-    u, u_theta_dd, u_lambda_dd, u_t_x_tilde_dds, u_t_v_tilde_dds = state.internal_action()
-    state.sig_theta = jnp.linalg.inv(-u_theta_dd)
-    state.sig_lambda = jnp.linalg.inv(-u_lambda_dd)
-    state.sig_x_tildes = -jnp.linalg.inv(u_t_x_tilde_dds)
-    state.sig_v_tildes = -jnp.linalg.inv(u_t_v_tilde_dds)
+    state.sig_theta, state.sig_lambda, state.sig_x_tildes, state.sig_v_tildes = _precision_update(
+                mu_theta=state.mu_theta,
+                mu_lambda=state.mu_lambda,
+                eta_theta=state.input.eta_theta,
+                eta_lambda=state.input.eta_lambda,
+                p_theta=state.input.p_theta,
+                p_lambda=state.input.p_lambda,
+                gen_func_g=state.input.gen_func_g,
+                gen_func_f=state.input.gen_func_f,
+                m_x=state.input.m_x,
+                m_v=state.input.m_v,
+                p=state.input.p,
+                d=state.input.d,
+                mu_x_tildes=state.mu_x_tildes,
+                mu_v_tildes=state.mu_v_tildes,
+                sig_x_tildes=state.sig_x_tildes,
+                sig_v_tildes=state.sig_v_tildes,
+                y_tildes=state.input.y_tildes,
+                eta_v_tildes=state.input.eta_v_tildes,
+                p_v_tildes=state.input.p_v_tildes,
+                omega_w=state.input.omega_w,
+                omega_z=state.input.omega_z,
+                noise_autocorr_inv=state.input.noise_autocorr_inv
+            )
+
+
+@partial(jit, static_argnames=('m_x', 'm_v', 'p', 'd', 'gen_func_f', 'gen_func_g', 'iter_lambda'))
+def _lambda_update(m_x,
+                  m_v,
+                  p,
+                  d,
+                  mu_x_tildes,
+                  mu_v_tildes,
+                  sig_x_tildes,
+                  sig_v_tildes,
+                  y_tildes,
+                  eta_v_tildes,
+                  p_v_tildes,
+                  eta_theta,
+                  eta_lambda,
+                  p_theta,
+                  p_lambda,
+                  mu_theta,
+                  mu_lambda,
+                  sig_theta,
+                  sig_lambda,
+                  gen_func_g,
+                  gen_func_f,
+                  omega_w,
+                  omega_z,
+                  noise_autocorr_inv, lr_lambda, iter_lambda, min_improv):
+    def lambda_free_action(mu_lambda):
+        # free action as a function of lambda
+        return free_action(
+                    m_x=m_x,
+                    m_v=m_v,
+                    p=p,
+                    d=d,
+                    mu_x_tildes=mu_x_tildes,
+                    mu_v_tildes=mu_v_tildes,
+                    sig_x_tildes=sig_x_tildes,
+                    sig_v_tildes=sig_v_tildes,
+                    y_tildes=y_tildes,
+                    eta_v_tildes=eta_v_tildes,
+                    p_v_tildes=p_v_tildes,
+                    eta_theta=eta_theta,
+                    eta_lambda=eta_lambda,
+                    p_theta=p_theta,
+                    p_lambda=p_lambda,
+                    mu_theta=mu_theta,
+                    mu_lambda=mu_lambda,
+                    sig_theta=sig_theta,
+                    sig_lambda=sig_lambda,
+                    gen_func_g=gen_func_g,
+                    gen_func_f=gen_func_f,
+                    omega_w=omega_w,
+                    omega_z=omega_z,
+                    noise_autocorr_inv=noise_autocorr_inv,
+                    skip_constant=False)
+
+    init_args = (0, -jnp.inf, -jnp.inf, mu_lambda)
+
+    def cond_fun(args):
+        step, f_bar, last_f_bar, mu_lambda = args
+        return jnp.logical_and(last_f_bar + min_improv <= f_bar, step < iter_lambda)
+
+    def body_fun(args):
+        step, last_f_bar, _, mu_lambda = args
+        f_bar, lambda_d_raw = value_and_grad(lambda_free_action)(mu_lambda)
+        lambda_d = lr_lambda * lambda_d_raw
+        lambda_dd = lr_lambda * hessian(lambda_free_action)(mu_lambda)
+        step_matrix = (jsp.linalg.expm(lambda_dd, max_squarings=MATRIX_EXPM_MAX_SQUARINGS) - jnp.eye(lambda_dd.shape[0], dtype=mu_lambda.dtype)) @ jnp.linalg.inv(lambda_dd)
+        mu_lambda = mu_lambda + step_matrix @ lambda_d
+        return step + 1, f_bar, last_f_bar, mu_lambda
+
+    step, f_bar, last_f_bar, mu_lambda = while_loop(cond_fun, body_fun, init_args)
+    return mu_lambda
 
 def dem_step_m(state: DEMStateJAX, lr_lambda, iter_lambda, min_improv):
     """
     Performs the noise hyperparameter update (step M) of DEM.
     """
-    def lambda_free_action(mu_lambda):
-        # free action as a function of lambda
-        return free_action(
-                    m_x=state.input.m_x,
-                    m_v=state.input.m_v,
-                    p=state.input.p,
-                    d=state.input.d,
-                    mu_x_tildes=state.mu_x_tildes,
-                    mu_v_tildes=state.mu_v_tildes,
-                    sig_x_tildes=state.sig_x_tildes,
-                    sig_v_tildes=state.sig_v_tildes,
-                    y_tildes=state.input.y_tildes,
-                    eta_v_tildes=state.input.eta_v_tildes,
-                    p_v_tildes=state.input.p_v_tildes,
-                    eta_theta=state.input.eta_theta,
-                    eta_lambda=state.input.eta_lambda,
-                    p_theta=state.input.p_theta,
-                    p_lambda=state.input.p_lambda,
-                    mu_theta=state.mu_theta,
-                    mu_lambda=mu_lambda,
-                    sig_theta=state.sig_theta,
-                    sig_lambda=state.sig_lambda,
-                    gen_func_g=state.input.gen_func_g,
-                    gen_func_f=state.input.gen_func_f,
-                    omega_w=state.input.omega_w,
-                    omega_z=state.input.omega_z,
-                    noise_autocorr_inv=state.input.noise_autocorr_inv,
-                    skip_constant=False)
-
-    init_args = (-jnp.inf, -jnp.inf, state.mu_lambda)
-
-    def cond_fun(args):
-        f_bar, last_f_bar, mu_lambda = args
-        return last_f_bar + min_improv <= f_bar
-
-    def body_fun(args):
-        last_f_bar, _, mu_lambda = args
-        f_bar, lambda_d_raw = value_and_grad(lambda_free_action)(mu_lambda)
-        lambda_d = lr_lambda * lambda_d_raw
-        lambda_dd = lr_lambda * hessian(lambda_free_action)(mu_lambda)
-        step_matrix = (jsp.linalg.expm(lambda_dd, max_squarings=MATRIX_EXPM_MAX_SQUARINGS) - jnp.eye(lambda_dd.shape[0], dtype=state.input.dtype)) @ jnp.linalg.inv(lambda_dd)
-        mu_lambda = mu_lambda + step_matrix @ lambda_d
-        return f_bar, last_f_bar, mu_lambda
-
-    f_bar, last_f_bar, mu_lambda = while_loop(cond_fun, body_fun, init_args)
-    state.mu_lambda = mu_lambda
+    state.mu_lambda = _lambda_update(m_x=state.input.m_x,
+        m_v=state.input.m_v,
+        p=state.input.p,
+        d=state.input.d,
+        mu_x_tildes=state.mu_x_tildes,
+        mu_v_tildes=state.mu_v_tildes,
+        sig_x_tildes=state.sig_x_tildes,
+        sig_v_tildes=state.sig_v_tildes,
+        y_tildes=state.input.y_tildes,
+        eta_v_tildes=state.input.eta_v_tildes,
+        p_v_tildes=state.input.p_v_tildes,
+        eta_theta=state.input.eta_theta,
+        eta_lambda=state.input.eta_lambda,
+        p_theta=state.input.p_theta,
+        p_lambda=state.input.p_lambda,
+        mu_theta=state.mu_theta,
+        mu_lambda=state.mu_lambda,
+        sig_theta=state.sig_theta,
+        sig_lambda=state.sig_lambda,
+        gen_func_g=state.input.gen_func_g,
+        gen_func_f=state.input.gen_func_f,
+        omega_w=state.input.omega_w,
+        omega_z=state.input.omega_z,
+        noise_autocorr_inv=state.input.noise_autocorr_inv,
+        lr_lambda=lr_lambda, iter_lambda=iter_lambda, min_improv=min_improv)
 
 
 # just calling jax.hessian takes incredible amounts of memory,
