@@ -10,11 +10,14 @@ from jaxlib.xla_extension import ArrayImpl
 import numpy as np
 import jax.numpy as jnp
 import jax.scipy as jsp
-from jax import jacfwd, vmap, hessian, grad, value_and_grad, jit
+from jax import jacfwd, vmap, hessian, grad, value_and_grad, jit, jacrev, vjp, jvp
 from jax.lax import fori_loop
+from math import ceil
 
 from ..noise import autocorr_friston, noise_cov_gen_theoretical
 from ..core import iterate_generalized
+
+MATRIX_EXPM_MAX_SQUARINGS = 100
 
 ##
 ## Free action computation
@@ -645,7 +648,7 @@ class DEMStateJAX:
                 mu_x_tildes=mu_x0_tilde[None],
                 mu_v_tildes=mu_v_tildes,
                 sig_x_tildes=sig_x_tildes,
-                sig_v_tildes=vmap(jnp.linalg.inv)(input.p_v_tildes),
+                sig_v_tildes=jnp.linalg.inv(input.p_v_tildes),
                 mu_theta=mu_theta,
                 mu_lambda=input.eta_lambda,
                 sig_theta=jnp.linalg.inv(input.p_theta),
@@ -797,8 +800,8 @@ def dem_step_d(state: DEMStateJAX, lr):
             noise_autocorr_inv=state.input.noise_autocorr_inv)
         x_dd = deriv_mat_x + _fix_grad_shape(x_dd)
         v_dd = deriv_mat_v + _fix_grad_shape(v_dd)
-        step_matrix_x = (jsp.linalg.expm(x_dd * state.input.dt) - jnp.eye(x_dd.shape[0], dtype=state.input.dtype)) @ jnp.linalg.inv(x_dd)
-        step_matrix_v = (jsp.linalg.expm(v_dd * state.input.dt) - jnp.eye(v_dd.shape[0], dtype=state.input.dtype)) @ jnp.linalg.inv(v_dd)
+        step_matrix_x = (jsp.linalg.expm(x_dd * state.input.dt, max_squarings=MATRIX_EXPM_MAX_SQUARINGS) - jnp.eye(x_dd.shape[0], dtype=state.input.dtype)) @ jnp.linalg.inv(x_dd)
+        step_matrix_v = (jsp.linalg.expm(v_dd * state.input.dt, max_squarings=MATRIX_EXPM_MAX_SQUARINGS) - jnp.eye(v_dd.shape[0], dtype=state.input.dtype)) @ jnp.linalg.inv(v_dd)
         mu_x_tilde_tp1 = mu_x_tilde_t + step_matrix_x @ x_d
         mu_v_tilde_tp1 = mu_v_tilde_t + step_matrix_v @ v_d
 
@@ -810,8 +813,6 @@ def dem_step_d(state: DEMStateJAX, lr):
     state.mu_x_tildes = mu_x_tildes
     state.mu_v_tildes = mu_v_tildes
 
-# FIXME torch -> jax below this line
-
 def dem_step_precision(state: DEMStateJAX):
     """
     Does a precision update of DEM.
@@ -819,8 +820,8 @@ def dem_step_precision(state: DEMStateJAX):
     u, u_theta_dd, u_lambda_dd, u_t_x_tilde_dds, u_t_v_tilde_dds = state.internal_action()
     state.sig_theta = jnp.linalg.inv(-u_theta_dd)
     state.sig_lambda = jnp.linalg.inv(-u_lambda_dd)
-    state.sig_x_tildes = -vmap(jnp.linalg.inv)(u_t_x_tilde_dds)
-    state.sig_v_tildes = -vmap(jnp.linalg.inv)(u_t_v_tilde_dds)
+    state.sig_x_tildes = -jnp.linalg.inv(u_t_x_tilde_dds)
+    state.sig_v_tildes = -jnp.linalg.inv(u_t_v_tilde_dds)
 
 def dem_step_m(state: DEMStateJAX, lr_lambda, iter_lambda, min_improv):
     """
@@ -859,7 +860,7 @@ def dem_step_m(state: DEMStateJAX, lr_lambda, iter_lambda, min_improv):
         f_bar, lambda_d_raw = value_and_grad(lambda_free_action)(state.mu_lambda)
         lambda_d = lr_lambda * lambda_d_raw
         lambda_dd = lr_lambda * hessian(lambda_free_action)(state.mu_lambda)
-        step_matrix = (jsp.linalg.expm(lambda_dd) - jnp.eye(lambda_dd.shape[0], dtype=state.input.dtype)) @ jnp.linalg.inv(lambda_dd)
+        step_matrix = (jsp.linalg.expm(lambda_dd, max_squarings=MATRIX_EXPM_MAX_SQUARINGS) - jnp.eye(lambda_dd.shape[0], dtype=state.input.dtype)) @ jnp.linalg.inv(lambda_dd)
         state.mu_lambda = state.mu_lambda + step_matrix @ lambda_d
         # convergence check
         if last_f_bar is not None:
@@ -868,7 +869,63 @@ def dem_step_m(state: DEMStateJAX, lr_lambda, iter_lambda, min_improv):
         last_f_bar = f_bar.copy()
 
 
-def dem_step_e(state: DEMStateJAX, lr_theta):
+# just calling jax.hessian takes incredible amounts of memory,
+# similar to here https://github.com/google/jax/issues/787#issuecomment-497146084
+
+# the implementations below are variations on an example from the docs:
+# https://jax.readthedocs.io/en/latest/notebooks/autodiff_cookbook.html#the-implementation-of-jacfwd-and-jacrev
+def jacrev_low_memory(f, batch_size):
+    """
+    A low-memory but slower version of jacrev. In contrast to standard jacrev,
+    it computes the jacobian in batches.
+    """
+    # this is slow, but takes less memory
+    def jacfun(x):
+        # y, jac = jax.vmap(pushfwd, out_axes=(None, 1))((basis,))
+        y, vjp_fun = vjp(f, x)
+        basis = jnp.eye(x.size, dtype=x.dtype)
+        Jr = []
+        for i in range(ceil(x.size / batch_size)):
+            batch = basis[(i * batch_size):((i + 1) * batch_size)]
+            Jb, = vmap(vjp_fun, in_axes=0)(batch)
+            Jr.append(Jb)
+        J = jnp.concatenate(Jr)
+        return J
+    return jacfun
+
+def jacfwd_low_memory(f, batch_size):
+    def jacfun(x):
+        _jvp = lambda s: jvp(f, (x,), (s,))[1]
+        basis = jnp.eye(x.size, dtype=x.dtype)
+        Jtr = []
+        for i in range(ceil(x.size / batch_size)):
+            batch = basis[(i * batch_size):((i + 1) * batch_size)]
+            Jtb = vmap(_jvp)(batch)
+            Jtr.append(Jtb)
+        Jt = jnp.concatenate(Jtr)
+        return jnp.transpose(Jt)
+    return jacfun
+
+def hessian_low_memory(f, batch_size, outer=jacfwd_low_memory):
+    return outer(jacrev(f), batch_size=batch_size)
+
+def jacfwd_low_memory_jittable(f, batch_size):
+    def jacfun(x):
+        _jvp = lambda s: jvp(f, (x,), (s,))[1]
+        basis = jnp.eye(x.size, dtype=x.dtype)
+        num_batches = jnp.ceil(x.size / batch_size).astype(int)
+        Jinit = jnp.empty((num_batches, batch_size, x.size))
+        def body_loop(i, J):
+            batch = jnp.eye(batch_size, x.size, k=(batch_size * i), dtype=x.dtype)
+            return J
+            Jtmp = vmap(_jvp)(batch)
+            return J.at[i].set(Jtmp)
+        Jtr = fori_loop(0, num_batches, body_loop, Jinit)
+        Jt = jnp.concatenate(Jtr[0:x.size])
+        return jnp.transpose(Jt)
+    return jacfun
+
+def dem_step_e(state: DEMStateJAX, lr_theta, hessian_batch_size=3):
     """
     Performs the parameter update (step E) of DEM.
     """
@@ -903,8 +960,8 @@ def dem_step_e(state: DEMStateJAX, lr_theta):
                     skip_constant=False)
     theta_d_raw = grad(theta_free_action)(state.mu_theta)
     theta_d = lr_theta * theta_d_raw
-    theta_dd = lr_theta * hessian(theta_free_action)(state.mu_theta)
-    step_matrix = (jsp.linalg.expm(theta_dd) - jnp.eye(theta_dd.shape[0], dtype=state.input.dtype)) @ jnp.linalg.inv(theta_dd)
+    theta_dd = lr_theta * hessian_low_memory(theta_free_action, batch_size=hessian_batch_size)(state.mu_theta)
+    step_matrix = (jsp.linalg.expm(theta_dd, max_squarings=MATRIX_EXPM_MAX_SQUARINGS) - jnp.eye(theta_dd.shape[0], dtype=state.input.dtype)) @ jnp.linalg.inv(theta_dd)
     state.mu_theta = state.mu_theta + step_matrix @ theta_d
 
 def dem_step(state: DEMStateJAX, lr_dynamic, lr_theta, lr_lambda, iter_lambda, m_min_improv=0.01):
