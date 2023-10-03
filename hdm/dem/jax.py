@@ -14,13 +14,18 @@ from jax import jacfwd, vmap, hessian, grad, value_and_grad, jit, jacrev, vjp, j
 from jax.lax import fori_loop, while_loop
 from math import ceil
 
+# DEM experiments often involve extremely high priors, which do not work well
+# with single precision float32
+from jax import config
+config.update("jax_enable_x64", True)
+
 from ..noise import autocorr_friston, noise_cov_gen_theoretical
 from ..core import iterate_generalized
 
 MATRIX_EXPM_MAX_SQUARINGS = 100
 
 ##
-## Free action computation
+## Helper functions
 ##
 
 @jit
@@ -41,6 +46,95 @@ def _fix_grad_shape(tensor):
     else:
         raise ValueError(f"Unexpected shape: {tuple(tensor.shape)}")
 
+
+@jit
+def logdet(matr):
+    """
+    Returns log determinant of a matrix, assuming that the determinant is
+    positive.
+    """
+    return jnp.linalg.slogdet(matr)[1]
+
+
+@partial(jit, static_argnames=('p', 'n',))
+def deriv_mat(p, n):
+    """
+    Block derivative operator.
+
+    Args:
+        p: number of derivatives
+        n: number of terms
+    """
+    return jnp.kron(jnp.eye(p + 1, k=1), jnp.eye(n))
+
+
+# sometimes computing hessians takes incredible amounts of memory
+# similar to here https://github.com/google/jax/issues/787#issuecomment-497146084
+# the functions below move away from vectorizing the hessian computation in
+# favour of serializing it, so that it takes less memory but takes longer
+
+# the implementations below are variations on an example from the docs:
+# https://jax.readthedocs.io/en/latest/notebooks/autodiff_cookbook.html#the-implementation-of-jacfwd-and-jacrev
+def jacrev_low_memory(f, batch_size):
+    """
+    A low-memory but slower version of jacrev. In contrast to standard jacrev,
+    it computes the jacobian in batches.
+    """
+    # this is slow, but takes less memory than the default method by not computing *everything* in parallel
+    def jacfun(x):
+        # y, jac = jax.vmap(pushfwd, out_axes=(None, 1))((basis,))
+        y, vjp_fun = vjp(f, x)
+        basis = jnp.eye(x.size, dtype=x.dtype)
+        Jr = []
+        for i in range(ceil(x.size / batch_size)):
+            batch = basis[(i * batch_size):((i + 1) * batch_size)]
+            Jb, = vmap(vjp_fun, in_axes=0)(batch)
+            Jr.append(Jb)
+        J = jnp.concatenate(Jr)
+        return J
+    return jacfun
+
+def jacfwd_low_memory(f, batch_size):
+    def jacfun(x):
+        _jvp = lambda s: jvp(f, (x,), (s,))[1]
+        basis = jnp.eye(x.size, dtype=x.dtype)
+        Jtr = []
+        for i in range(ceil(x.size / batch_size)):
+            batch = basis[(i * batch_size):((i + 1) * batch_size)]
+            Jtb = vmap(_jvp)(batch)
+            Jtr.append(Jtb)
+        Jt = jnp.concatenate(Jtr)
+        return jnp.transpose(Jt)
+    return jacfun
+
+def jacfwd_low_memory_jit(f):
+    # The batching mechanism used in low_memory functions above relies upon
+    # dynamically sized slicing of jnp.eye, but JAX does not support dynamic
+    # slices for jit compiled functions. Also it's not possible to call jnp.eye
+    # with a dynamic integer input either.
+    def jacfun(x):
+        _jvp = lambda s: jvp(f, (x,), (s,))[1]
+        basis = jnp.eye(x.size, dtype=x.dtype)
+        def body_loop(i, J):
+            basis_vec = basis[i]
+            Jtmp = _jvp(basis_vec)
+            return J.at[i].set(Jtmp)
+        Jinit = jnp.empty((x.size, x.size))
+        Jt = fori_loop(0, x.size, body_loop, Jinit)
+        return jnp.transpose(Jt)
+    return jacfun
+
+def hessian_low_memory(f, outer=partial(jacfwd_low_memory, batch_size=3)):
+    return outer(jacrev(f))
+
+def hessian_low_memory_jit(f):
+    # just a special case of hessian_low_memory to ensure JIT-compatibility
+    return jacfwd_low_memory_jit(jacrev(f))
+
+
+##
+## Free action computation
+##
 
 def tilde_to_grad(func, mu_x_tilde, mu_v_tilde, m_x, m_v, p, params):
     """Computes gradient and function value given x and v in generalized
@@ -77,9 +171,6 @@ def generalized_func(func, mu_x_tildes, mu_v_tildes, m_x, m_v, p, params):
     func_appl_d_v = jnp.einsum('bkj,bdj->bdk', mu_v_grad, mu_v_tildes_r[:, 1:,:]).reshape((n_batch, -1, 1))
     return jnp.concatenate((func_appl, func_appl_d_x + func_appl_d_v), axis=1)
 
-@jit
-def logdet(matr):
-    return jnp.linalg.slogdet(matr)[1]
 
 @jit
 def _int_eng_par_static(
@@ -97,6 +188,7 @@ def internal_energy_static(
         eta_lambda,
         p_theta,
         p_lambda,
+        low_memory=False
         ):
     """
     Computes static terms of the internal energy, along with necessary
@@ -111,34 +203,26 @@ def internal_energy_static(
     u_c_lambda = _int_eng_par_static(mu_lambda, eta_lambda, p_lambda)
     u_c = u_c_theta + u_c_lambda
 
+    if low_memory:
+        hessian_func = hessian_low_memory_jit
+    else:
+        hessian_func = hessian
+
     # compute hessians used for mean-field terms in free action
-    u_c_theta_dd = hessian(lambda mu: _int_eng_par_static(mu, eta_theta, p_theta))(mu_theta)
-    u_c_lambda_dd = hessian(lambda mu: _int_eng_par_static(mu, eta_lambda, p_lambda))(mu_lambda)
+    u_c_theta_dd = hessian_func(lambda mu: _int_eng_par_static(mu, eta_theta, p_theta))(mu_theta)
+    u_c_lambda_dd = hessian_func(lambda mu: _int_eng_par_static(mu, eta_lambda, p_lambda))(mu_lambda)
     return u_c, u_c_theta_dd, u_c_lambda_dd
 
-@partial(jit, static_argnames=('p', 'n',))
-def deriv_mat(p, n):
-    """
-    Block derivative operator.
 
-    Args:
-        p: number of derivatives
-        n: number of terms
-    """
-    return jnp.kron(jnp.eye(p + 1, k=1), jnp.eye(n))
-
-# gen_func_f = jit(lambda mu_x_tildes, mu_v_tildes, params: generalized_func(f_jax, mu_x_tildes, mu_v_tildes, m_x, m_v, p, params))
 def internal_energy_dynamic(
         gen_func_f, gen_func_g, mu_x_tildes, mu_v_tildes, y_tildes, m_x, m_v, p, d, mu_theta, eta_v_tildes, p_v_tildes,
-        mu_lambda, omega_w, omega_z, noise_autocorr_inv, diagnostic=False):
-    # FIXME: Unfinished in JAX
-
+        mu_lambda, omega_w, omega_z, noise_autocorr_inv, low_memory=False, diagnostic=False):
     deriv_mat_x = deriv_mat(p, m_x)
 
     @partial(jit, static_argnames=('diagnostic',))
     def _int_eng_dynamic(mu_x_tildes, mu_v_tildes, mu_theta, mu_lambda, diagnostic=False):
         # Need to pad v_tilde with zeros to account for difference between
-        # state embedding number `p` and causes embedding number `d`.
+        # state embedding order `p` and causes embedding order `d`.
         mu_v_tildes_pad = jnp.pad(mu_v_tildes, ((0, 0), (0, p - d), (0, 0)))
         f_tildes = gen_func_f(mu_x_tildes, mu_v_tildes_pad, mu_theta)
         g_tildes = gen_func_g(mu_x_tildes, mu_v_tildes_pad, mu_theta)
@@ -187,24 +271,22 @@ def internal_energy_dynamic(
     else:
         u_t = out
 
+    # NOTE: It seems more efficient to run `hessian` four times, once per each
+    # argument, rather than just run it once for all arguments at once
+    if low_memory:
+        hessian_func = hessian_low_memory_jit
+    else:
+        hessian_func = hessian
+    # FIXME: make it possible to use hessian_low_memory_jit below
+    # need to improve hessian_low_memory_jit to support the shapes of mu_x_tildes and mu_v_tildes
     u_t_x_tilde_dd = hessian(lambda mu_x_tildes:
                              jnp.sum(_int_eng_dynamic(mu_x_tildes, mu_v_tildes, mu_theta, mu_lambda)))(mu_x_tildes)
     u_t_v_tilde_dd = hessian(lambda mu_v_tildes:
                              jnp.sum(_int_eng_dynamic(mu_x_tildes, mu_v_tildes, mu_theta, mu_lambda)))(mu_v_tildes)
-    u_t_theta_dd = hessian(lambda mu_theta:
+    u_t_theta_dd = hessian_func(lambda mu_theta:
                            jnp.sum(_int_eng_dynamic(mu_x_tildes, mu_v_tildes, mu_theta, mu_lambda)))(mu_theta)
-    u_t_lambda_dd = hessian(lambda mu_lambda:
+    u_t_lambda_dd = hessian_func(lambda mu_lambda:
                             jnp.sum(_int_eng_dynamic(mu_x_tildes, mu_v_tildes, mu_theta, mu_lambda)))(mu_lambda)
-
-    # fix shapes
-    # batch_n = tensor.shape[0]
-    # batch_selection = jnp.arange(batch_n)
-    # out_n = tensor.shape[1]
-    # in_n = tensor.shape[4]
-    # u_t_x_tilde_dd = u_t_x_tilde_dd[batch_selection,:,0,batch_selection,:,0]
-    # u_t_v_tilde_dd = u_t_v_tilde_dd[batch_selection,:,0,batch_selection,:,0]
-    # u_t_theta_dd = u_t_theta_dd.reshape((u_t_theta_dd.shape[0], u_t_theta_dd.shape[2]))
-    # u_t_lambda_dd = u_t_lambda_dd.reshape((u_t_lambda_dd.shape[0], u_t_lambda_dd.shape[2]))
 
     u_t_x_tilde_dd = _fix_grad_shape(u_t_x_tilde_dd)
     u_t_v_tilde_dd = _fix_grad_shape(u_t_v_tilde_dd)
@@ -234,7 +316,8 @@ def internal_action(
         sig_x_tildes, sig_v_tildes,
         y_tildes,
         eta_v_tildes, p_v_tildes,
-        omega_w, omega_z, noise_autocorr_inv
+        omega_w, omega_z, noise_autocorr_inv,
+        low_memory=False
         ):
     """
     Computes internal energy/action, and hessians. Used to update precisions at the end of a
@@ -246,11 +329,12 @@ def internal_action(
         eta_theta,
         eta_lambda,
         p_theta,
-        p_lambda
+        p_lambda,
+        low_memory=low_memory
     )
     u_t, u_t_x_tilde_dds, u_t_v_tilde_dds, u_t_theta_dd, u_t_lambda_dd = internal_energy_dynamic(
         gen_func_f, gen_func_g, mu_x_tildes, mu_v_tildes, y_tildes, m_x, m_v, p, d, mu_theta, eta_v_tildes, p_v_tildes,
-        mu_lambda, omega_w, omega_z, noise_autocorr_inv)
+        mu_lambda, omega_w, omega_z, noise_autocorr_inv, low_memory=low_memory)
     u += jnp.sum(u_t)
     return u, u_theta_dd, u_lambda_dd, u_t_x_tilde_dds, u_t_v_tilde_dds
 
@@ -259,7 +343,7 @@ def _batch_matmul_trace_sum(sig_tilde, u_t_tilde_dd):
     return vmap(lambda sig_tilde, u_t_tilde_dd: jnp.trace(jnp.matmul(sig_tilde, u_t_tilde_dd)))(sig_tilde, u_t_tilde_dd).sum()
 
 
-@partial(jit, static_argnames=('m_x', 'm_v', 'p', 'd', 'gen_func_f', 'gen_func_g', 'skip_constant', 'diagnostic',))
+@partial(jit, static_argnames=('m_x', 'm_v', 'p', 'd', 'gen_func_f', 'gen_func_g', 'skip_constant', 'diagnostic', 'low_memory'))
 def free_action(
         # how many terms are there in mu_x and mu_v?
         m_x, m_v,
@@ -303,7 +387,11 @@ def free_action(
         skip_constant=False,
 
         # Whether to return an extra dictionary of detailed information
-        diagnostic=False
+        diagnostic=False,
+
+        # Whether to rely on a slow but low-memory method to compute hessians
+        # for mean-field terms
+        low_memory=False
         ):
     extr = {}
     # Constant terms of free action
@@ -314,7 +402,8 @@ def free_action(
             eta_theta,
             eta_lambda,
             p_theta,
-            p_lambda
+            p_lambda,
+            low_memory=low_memory
         )
 
         sig_logdet_c = (logdet(sig_theta) + logdet(sig_lambda)) / 2
@@ -333,7 +422,7 @@ def free_action(
     # Dynamic terms of free action that vary with time
     out = internal_energy_dynamic(
         gen_func_f, gen_func_g, mu_x_tildes, mu_v_tildes, y_tildes, m_x, m_v, p, d, mu_theta, eta_v_tildes, p_v_tildes,
-        mu_lambda, omega_w, omega_z, noise_autocorr_inv, diagnostic=diagnostic)
+        mu_lambda, omega_w, omega_z, noise_autocorr_inv, diagnostic=diagnostic, low_memory=low_memory)
     if diagnostic:
         u_t, u_t_x_tilde_dd, u_t_v_tilde_dd, u_t_theta_dd, u_t_lambda_dd, extr_dt = out
         extr = {**extr, **extr_dt}
@@ -379,6 +468,7 @@ def free_action(
 
 
 def _verify_attr_dtypes(parent, attributes, dtype):
+    """Verifies that all of the"""
     for attr in attributes:
         obj = getattr(parent, attr)
         if not isinstance(obj, ArrayImpl) and not isinstance(obj, np.ndarray):
@@ -431,6 +521,7 @@ class DEMInputJAX:
     # the noise is assumed to come from a Gaussian process with a Gaussian
     # covariance kernel. For alternative temporal covariance structures,
     # overwrite v_autocorr_inv and noise_autocorr_inv.
+    # TODO: Discussion of precise meaning of sigma.
     noise_temporal_sig: float
 
     # Precomputed values
@@ -438,9 +529,9 @@ class DEMInputJAX:
     eta_v_tildes: ArrayImpl = None
     p_v_tildes: ArrayImpl = None
 
-    # Compute larger embeddings to truncate them?
+    # Compute larger embedding vectors than used and truncate them to increase
+    # accuracy
     p_comp: int = None # >= p
-    d_comp: int = None # >= d
 
     # Datatype for numerical precision
     dtype: jnp.dtype = None
@@ -464,8 +555,7 @@ class DEMInputJAX:
         self.n = self.ys.shape[0]
         if self.p_comp is None:
             self.p_comp = self.p
-        if self.d_comp is None:
-            self.d_comp = self.d
+        self.d_comp = self.p_comp
         # Precomputed values
         if self.noise_temporal_sig is not None:
             if self.v_autocorr_inv is None:
@@ -626,7 +716,12 @@ class DEMStateJAX:
                 noise_autocorr_inv=state.input.noise_autocorr_inv)
 
     @classmethod
-    def from_input(cls, input: DEMInputJAX, x0: ArrayImpl,  mu_theta: ArrayImpl=None, **kwargs):
+    def from_input(cls, input: DEMInputJAX, x0: ArrayImpl=None,  mu_theta: ArrayImpl=None, **kwargs):
+        """
+        Initializes the DEM state with some sane defaults compatible with the input.
+        """
+        if x0 is None:
+            x0 = np.zeros(input.m_x)
         x0 = x0.reshape(-1)
         assert len(x0) == input.m_x
 
@@ -814,7 +909,7 @@ def dem_step_d(state: DEMStateJAX, lr):
     state.mu_v_tildes = mu_v_tildes
 
 
-@partial(jit, static_argnames=('m_x', 'm_v', 'p', 'd', 'gen_func_f', 'gen_func_g'))
+@partial(jit, static_argnames=('m_x', 'm_v', 'p', 'd', 'gen_func_f', 'gen_func_g', 'low_memory'))
 def _precision_update(
         mu_theta,
         mu_lambda,
@@ -828,7 +923,7 @@ def _precision_update(
         sig_x_tildes, sig_v_tildes,
         y_tildes,
         eta_v_tildes, p_v_tildes,
-        omega_w, omega_z, noise_autocorr_inv):
+        omega_w, omega_z, noise_autocorr_inv, low_memory):
     u, u_theta_dd, u_lambda_dd, u_t_x_tilde_dds, u_t_v_tilde_dds = internal_action(
                 mu_theta=mu_theta,
                 mu_lambda=mu_lambda,
@@ -851,7 +946,8 @@ def _precision_update(
                 p_v_tildes=p_v_tildes,
                 omega_w=omega_w,
                 omega_z=omega_z,
-                noise_autocorr_inv=noise_autocorr_inv
+                noise_autocorr_inv=noise_autocorr_inv,
+                low_memory=low_memory
             )
     sig_theta = jnp.linalg.inv(-u_theta_dd)
     sig_lambda = jnp.linalg.inv(-u_lambda_dd)
@@ -861,7 +957,7 @@ def _precision_update(
 
 
 
-def dem_step_precision(state: DEMStateJAX):
+def dem_step_precision(state: DEMStateJAX, low_memory=False):
     """
     Does a precision update of DEM.
     """
@@ -887,7 +983,8 @@ def dem_step_precision(state: DEMStateJAX):
                 p_v_tildes=state.input.p_v_tildes,
                 omega_w=state.input.omega_w,
                 omega_z=state.input.omega_z,
-                noise_autocorr_inv=state.input.noise_autocorr_inv
+                noise_autocorr_inv=state.input.noise_autocorr_inv,
+                low_memory=low_memory
             )
 
 
@@ -994,68 +1091,8 @@ def dem_step_m(state: DEMStateJAX, lr_lambda, iter_lambda, min_improv):
         lr_lambda=lr_lambda, iter_lambda=iter_lambda, min_improv=min_improv)
 
 
-# just calling jax.hessian takes incredible amounts of memory,
-# similar to here https://github.com/google/jax/issues/787#issuecomment-497146084
 
-# the implementations below are variations on an example from the docs:
-# https://jax.readthedocs.io/en/latest/notebooks/autodiff_cookbook.html#the-implementation-of-jacfwd-and-jacrev
-def jacrev_low_memory(f, batch_size):
-    """
-    A low-memory but slower version of jacrev. In contrast to standard jacrev,
-    it computes the jacobian in batches.
-    """
-    # this is slow, but takes less memory than the default method by not computing *everything* in parallel
-    def jacfun(x):
-        # y, jac = jax.vmap(pushfwd, out_axes=(None, 1))((basis,))
-        y, vjp_fun = vjp(f, x)
-        basis = jnp.eye(x.size, dtype=x.dtype)
-        Jr = []
-        for i in range(ceil(x.size / batch_size)):
-            batch = basis[(i * batch_size):((i + 1) * batch_size)]
-            Jb, = vmap(vjp_fun, in_axes=0)(batch)
-            Jr.append(Jb)
-        J = jnp.concatenate(Jr)
-        return J
-    return jacfun
-
-def jacfwd_low_memory(f, batch_size):
-    def jacfun(x):
-        _jvp = lambda s: jvp(f, (x,), (s,))[1]
-        basis = jnp.eye(x.size, dtype=x.dtype)
-        Jtr = []
-        for i in range(ceil(x.size / batch_size)):
-            batch = basis[(i * batch_size):((i + 1) * batch_size)]
-            Jtb = vmap(_jvp)(batch)
-            Jtr.append(Jtb)
-        Jt = jnp.concatenate(Jtr)
-        return jnp.transpose(Jt)
-    return jacfun
-
-def jacfwd_low_memory_jit(f):
-    # The batching mechanism used in low_memory functions above relies upon
-    # dynamically sized slicing of jnp.eye, but JAX does not support dynamic
-    # slices for jit compiled functions. Also it's not possible to call jnp.eye
-    # with a dynamic integer input either.
-    def jacfun(x):
-        _jvp = lambda s: jvp(f, (x,), (s,))[1]
-        basis = jnp.eye(x.size, dtype=x.dtype)
-        def body_loop(i, J):
-            basis_vec = basis[i]
-            Jtmp = _jvp(basis_vec)
-            return J.at[i].set(Jtmp)
-        Jinit = jnp.empty((x.size, x.size))
-        Jt = fori_loop(0, x.size, body_loop, Jinit)
-        return jnp.transpose(Jt)
-    return jacfun
-
-def hessian_low_memory(f, outer=partial(jacfwd_low_memory, batch_size=3)):
-    return outer(jacrev(f))
-
-def hessian_low_memory_jit(f):
-    # just a special case of hessian_low_memory to ensure JIT-compatibility
-    return jacfwd_low_memory_jit(jacrev(f))
-
-@partial(jit, static_argnames=('m_x', 'm_v', 'p', 'd', 'gen_func_f', 'gen_func_g'))
+@partial(jit, static_argnames=('m_x', 'm_v', 'p', 'd', 'gen_func_f', 'gen_func_g', 'low_memory'))
 def _theta_update(m_x,
                   m_v,
                   p,
@@ -1079,7 +1116,7 @@ def _theta_update(m_x,
                   gen_func_f,
                   omega_w,
                   omega_z,
-                  noise_autocorr_inv, lr_theta):
+                  noise_autocorr_inv, lr_theta, low_memory):
     def theta_free_action(mu_theta):
         return free_action(
                     m_x=m_x,
@@ -1109,12 +1146,18 @@ def _theta_update(m_x,
                     skip_constant=False)
     theta_d_raw = grad(theta_free_action)(mu_theta)
     theta_d = lr_theta * theta_d_raw
-    theta_dd = lr_theta * hessian_low_memory_jit(theta_free_action)(mu_theta)
+    # using standard jax.hessian causes an out-of-memory in even relatively
+    # easy cases (tested on a 20 gb ram machine)
+    if low_memory:
+        hessian_func = hessian_low_memory_jit
+    else:
+        hessian_func = hessian
+    theta_dd = lr_theta * hessian_func(theta_free_action)(mu_theta)
     step_matrix = (jsp.linalg.expm(theta_dd, max_squarings=MATRIX_EXPM_MAX_SQUARINGS) - jnp.eye(theta_dd.shape[0], dtype=mu_theta.dtype)) @ jnp.linalg.inv(theta_dd)
     return mu_theta + step_matrix @ theta_d
 
 
-def dem_step_e(state: DEMStateJAX, lr_theta, hess_func=hessian_low_memory):
+def dem_step_e(state: DEMStateJAX, lr_theta, low_memory=True):
     """
     Performs the parameter update (step E) of DEM.
     """
@@ -1141,7 +1184,7 @@ def dem_step_e(state: DEMStateJAX, lr_theta, hess_func=hessian_low_memory):
                   gen_func_f=state.input.gen_func_f,
                   omega_w=state.input.omega_w,
                   omega_z=state.input.omega_z,
-                  noise_autocorr_inv=state.input.noise_autocorr_inv, lr_theta=lr_theta)
+                  noise_autocorr_inv=state.input.noise_autocorr_inv, lr_theta=lr_theta, low_memory=low_memory)
     # TODO: should be an if statement comparing new f_bar with old
 
 def dem_step(state: DEMStateJAX, lr_dynamic, lr_theta, lr_lambda, iter_lambda, m_min_improv=0.01):
@@ -1152,3 +1195,25 @@ def dem_step(state: DEMStateJAX, lr_dynamic, lr_theta, lr_lambda, iter_lambda, m
     dem_step_m(state, lr_lambda, iter_lambda, min_improv=m_min_improv)
     dem_step_e(state, lr_theta)
     dem_step_precision(state)
+
+##
+## Functions for inspecting DEM states
+##
+
+def generalized_batch_to_sequence(tensor, m, is2d=False):
+    if not is2d:
+        xs = jnp.stack([x_tilde[:m] for x_tilde in tensor], axis=0)[:,:,0]
+    else:
+        xs = jnp.stack([jnp.diagonal(x_tilde)[:m] for x_tilde in tensor], axis=0)
+    return xs
+
+def extract_dynamic(state):
+    mu_xs = generalized_batch_to_sequence(state.mu_x_tildes, state.input.m_x)
+    sig_xs = generalized_batch_to_sequence(state.sig_x_tildes, state.input.m_x, is2d=True)
+    mu_vs = generalized_batch_to_sequence(state.mu_v_tildes, state.input.m_v)
+    sig_vs = generalized_batch_to_sequence(state.sig_v_tildes, state.input.m_v, is2d=True)
+    idx_first = int(state.input.p_comp // 2)
+    idx_last = idx_first + len(mu_xs)
+    ts_all = jnp.arange(state.input.n) * state.input.dt
+    ts = ts_all[idx_first:idx_last]
+    return mu_xs, sig_xs, mu_vs, sig_vs, ts
