@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from scipy.special import factorial
 
+
 def taylor_mat(p, dt, m=1, inv=False):
     """
     Taylor approximation matrix. Used for a Taylor polynomial approximation to
@@ -31,7 +32,9 @@ def taylor_mat(p, dt, m=1, inv=False):
     matr = np.empty((p + 1, p + 1))
     for i in range(1, p + 2):
         for j in range(1, p + 2):
-            matr[i - 1, j - 1] = np.power((i - np.ceil((p + 1)/2)) * dt, j - 1) / factorial(j - 1)
+            matr[i - 1, j - 1] = np.power(
+                (i - np.ceil((p + 1) / 2)) * dt, j - 1
+            ) / factorial(j - 1)
     if inv:
         matr = np.linalg.inv(matr)
     if m > 1:
@@ -90,20 +93,21 @@ def iterate_generalized(y, dt, p, p_comp=None):
     if y.ndim == 1:
         y = y.reshape((-1, 1))
 
-    m = y.shape[1]
+    y.shape[1]
 
     mat = taylor_mat(p_comp, dt, inv=True)
     if isinstance(y, torch.Tensor):
         mat = torch.from_numpy(mat).to(dtype=y.dtype, device=y.device)
 
     for i in range(0, y.shape[0] - p_comp - 1):
-        weaved = weave_gen((mat @ y[i:(i + p_comp + 1), :])[:(p + 1), :])
+        weaved = weave_gen((mat @ y[i : (i + p_comp + 1), :])[: (p + 1), :])
         yield weaved
 
 
 def len_generalized(n, p_comp):
     """How many generalized samples are we getting out of a size n sample?"""
     return n - p_comp - 1
+
 
 def deriv_mat(p, n):
     """

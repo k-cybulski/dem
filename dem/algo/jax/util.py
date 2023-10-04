@@ -1,25 +1,12 @@
-
 from functools import partial
-from jax import jit
-import jax.numpy as jnp
-
 from math import ceil
 
+import jax.numpy as jnp
 # DEM experiments often involve extremely high priors, which do not work well
 # with single precision float32
-from jax import (
-    config,
-    grad,
-    hessian,
-    jacfwd,
-    jacrev,
-    jit,
-    jvp,
-    value_and_grad,
-    vjp,
-    vmap,
-)
-from jax.lax import fori_loop, while_loop
+from jax import jacrev, jit, jvp, vjp, vmap
+from jax.lax import fori_loop
+
 
 @jit
 def _fix_grad_shape(tensor):

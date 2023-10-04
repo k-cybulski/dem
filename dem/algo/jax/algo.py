@@ -4,37 +4,22 @@ This module contains an implementation of DEM using JAX.
 
 from dataclasses import dataclass, field
 from functools import partial
-from math import ceil
 from typing import Callable
-
-import numpy as np
-from jaxlib.xla_extension import ArrayImpl
 
 import jax.numpy as jnp
 import jax.scipy as jsp
-
+import numpy as np
 # DEM experiments often involve extremely high priors, which do not work well
 # with single precision float32
-from jax import (
-    config,
-    grad,
-    hessian,
-    jacfwd,
-    jacrev,
-    jit,
-    jvp,
-    value_and_grad,
-    vjp,
-    vmap,
-)
+from jax import config, grad, hessian, jacfwd, jit, value_and_grad, vmap
 from jax.lax import fori_loop, while_loop
+from jaxlib.xla_extension import ArrayImpl
 
 config.update("jax_enable_x64", True)
 
 from ...core import iterate_generalized
 from ...noise import autocorr_friston, noise_cov_gen_theoretical
-
-from .util import _fix_grad_shape, logdet, deriv_mat, hessian_low_memory_jit
+from .util import _fix_grad_shape, deriv_mat, hessian_low_memory_jit, logdet
 
 MATRIX_EXPM_MAX_SQUARINGS = 100
 
@@ -1614,12 +1599,14 @@ class DEMStateJAX:
 ## Functions for inspecting DEM states
 ##
 
+
 def generalized_batch_to_sequence(tensor, m, is2d=False):
     if not is2d:
         xs = jnp.stack([x_tilde[:m] for x_tilde in tensor], axis=0)[:, :, 0]
     else:
         xs = jnp.stack([jnp.diagonal(x_tilde)[:m] for x_tilde in tensor], axis=0)
     return xs
+
 
 def extract_dynamic(state: DEMStateJAX):
     mu_xs = generalized_batch_to_sequence(state.mu_x_tildes, state.input.m_x)

@@ -1,8 +1,7 @@
-import numpy as np
-import torch
-import pytest
-
 import dem.core
+import numpy as np
+import pytest
+import torch
 
 
 @pytest.fixture

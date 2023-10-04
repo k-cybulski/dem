@@ -2,11 +2,12 @@
 Various helper functions for testing.
 """
 
-import torch
 import numpy as np
+import torch
 from scipy.integrate import solve_ivp
 
 from .noise import generate_noise_conv
+
 
 def sin_gen(p, t):
     n = p + 1
@@ -24,9 +25,11 @@ def sin_gen(p, t):
                 matr[i, 0] = -np.cos(t)
     return matr
 
+
 def cos_gen(p, t):
     sin_gen_ = sin_gen(p + 1, t)
     return sin_gen_[1:]
+
 
 def combine_gen(gen1, gen2):
     # https://stackoverflow.com/a/5347492
@@ -45,12 +48,13 @@ def wrap_with_innovations(ts, ws, vs):
 
         x' = f(x, v) + w
     """
+
     def wrapper(func):
         def f(t, x):
             # FIXME OPT: Vectorize?
             noises = []
             for col in range(ws.shape[1]):
-                noise_col = np.interp(t, ts, ws[:,col])
+                noise_col = np.interp(t, ts, ws[:, col])
                 noises.append(noise_col)
             w = np.array(noises)
 
@@ -58,12 +62,15 @@ def wrap_with_innovations(ts, ws, vs):
             if t > 5:
                 2 + 3
             for col in range(vs.shape[1]):
-                v_col = np.interp(t, ts, vs[:,col])
+                v_col = np.interp(t, ts, vs[:, col])
                 vsin.append(v_col)
             v = np.array(vsin)
             return func(x, v) + w
+
         return f
+
     return wrapper
+
 
 def solve_ivp_euler(ode_f, t_span, x0, ts):
     dts = ts[1:] - ts[:-1]
@@ -75,7 +82,10 @@ def solve_ivp_euler(ode_f, t_span, x0, ts):
         xs.append(x)
     return np.stack(xs)
 
-def simulate_system(f, g, x0, dt, vs, w_sd, z_sd, noise_temporal_sig, rng=None, method='euler'):
+
+def simulate_system(
+    f, g, x0, dt, vs, w_sd, z_sd, noise_temporal_sig, rng=None, method="euler"
+):
     """
     Simulates a system defined by
 
@@ -101,45 +111,46 @@ def simulate_system(f, g, x0, dt, vs, w_sd, z_sd, noise_temporal_sig, rng=None, 
     ts = np.arange(start=t_start, stop=t_end, step=dt)
     n = int((t_end - t_start) / dt)
     m_x = len(x0)
-    m_v = vs.shape[1]
+    vs.shape[1]
 
-    out_of_0 = g(x0, vs[0]) # used to check shapes of output
+    out_of_0 = g(x0, vs[0])  # used to check shapes of output
     if np.ndim(out_of_0) == 0:
         m_y = 1
     else:
         m_y = out_of_0.shape[0]
 
-    ws = np.vstack([
-            generate_noise_conv(n, dt, w_sd ** 2, noise_temporal_sig, rng=rng)
+    ws = np.vstack(
+        [
+            generate_noise_conv(n, dt, w_sd**2, noise_temporal_sig, rng=rng)
             for _ in range(m_x)
-        ]).T
-    zs = np.vstack([
-            generate_noise_conv(n, dt, z_sd ** 2, noise_temporal_sig, rng=rng)
+        ]
+    ).T
+    zs = np.vstack(
+        [
+            generate_noise_conv(n, dt, z_sd**2, noise_temporal_sig, rng=rng)
             for _ in range(m_y)
-        ]).T
+        ]
+    ).T
 
     @wrap_with_innovations(ts, ws, vs)
     def ode_f(x, v):
         return f(x, v)
 
-    if method == 'scipy':
+    if method == "scipy":
         out = solve_ivp(ode_f, t_span, x0, t_eval=ts)
         xs = out.y.T
-    elif method == 'euler':
+    elif method == "euler":
         xs = solve_ivp_euler(ode_f, t_span, x0, ts)
     else:
         raise ValueError("Unsupported method for integrating ODEs")
 
-    gs = np.array([
-        g(x, v).reshape(-1) for x, v in zip(xs, vs)
-    ])
+    gs = np.array([g(x, v).reshape(-1) for x, v in zip(xs, vs)])
     ys = gs + zs
 
     return ts, xs, ys, ws, zs
 
 
-def simulate_colored_lti(A, B, C, D, x0, dt, vs,
-                         w_sd, z_sd, noise_temporal_sig, rng):
+def simulate_colored_lti(A, B, C, D, x0, dt, vs, w_sd, z_sd, noise_temporal_sig, rng):
     """
     Simulates an LTI system with colored noise.
 
@@ -158,23 +169,37 @@ def simulate_colored_lti(A, B, C, D, x0, dt, vs,
         noise_temporal_sig: bandwidth of the temporal smoothing kernel
         rng: random number generator. Seed or np.random.Generator
     """
-    assert all(len(matr.shape) == 2 for matr in (A, B, C, D)) # all are 2d matrices
-    assert A.shape[0] == A.shape[1] # A is square
-    assert A.shape[0] == B.shape[0] # B transforms inputs v into same shape as states x
-    assert C.shape[1] == A.shape[0] # C accepts state vectors x
-    assert B.shape[1] == D.shape[1] # B and D accept input vectors v
-    assert C.shape[0] == D.shape[0] # C and D output the same shape of vectors
+    assert all(len(matr.shape) == 2 for matr in (A, B, C, D))  # all are 2d matrices
+    assert A.shape[0] == A.shape[1]  # A is square
+    assert A.shape[0] == B.shape[0]  # B transforms inputs v into same shape as states x
+    assert C.shape[1] == A.shape[0]  # C accepts state vectors x
+    assert B.shape[1] == D.shape[1]  # B and D accept input vectors v
+    assert C.shape[0] == D.shape[0]  # C and D output the same shape of vectors
 
     def f(x, v):
         return A @ x + B @ v
 
     def g(x, v):
         return C @ x + D @ v
+
     return simulate_system(f, g, x0, dt, vs, w_sd, z_sd, noise_temporal_sig, rng=rng)
 
-def dummy_lti(m_x, m_v, m_y, n, dt,
-              x0, vs,
-              w_sd, z_sd, noise_temporal_sig, rng, v_sd=None, v_temporal_sig=None):
+
+def dummy_lti(
+    m_x,
+    m_v,
+    m_y,
+    n,
+    dt,
+    x0,
+    vs,
+    w_sd,
+    z_sd,
+    noise_temporal_sig,
+    rng,
+    v_sd=None,
+    v_temporal_sig=None,
+):
     """
     Generates and simulates a random LTI with colored noise. The inputs to the
     system are generated as a Gaussian process.
@@ -190,12 +215,15 @@ def dummy_lti(m_x, m_v, m_y, n, dt,
     if x0 is None:
         x0 = rng.normal(np.zeros(m_x))
     if vs is None:
-        vs = np.vstack([
-            generate_noise_conv(n, dt, v_sd ** 2, v_temporal_sig, rng=rng)
-            for _ in range(m_v)
-        ]).T
-    ts, xs, ys, ws, zs = simulate_colored_lti(A, B, C, D, x0, dt, vs,
-                                              w_sd, z_sd, noise_temporal_sig, rng)
+        vs = np.vstack(
+            [
+                generate_noise_conv(n, dt, v_sd**2, v_temporal_sig, rng=rng)
+                for _ in range(m_v)
+            ]
+        ).T
+    ts, xs, ys, ws, zs = simulate_colored_lti(
+        A, B, C, D, x0, dt, vs, w_sd, z_sd, noise_temporal_sig, rng
+    )
     return A, B, C, D, x0, ts, vs, xs, ys, ws, zs
 
 
