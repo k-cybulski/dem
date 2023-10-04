@@ -501,7 +501,7 @@ class DEMStateBatched:
 
         return cls(**kwargs)
 
-    def dem_step_d(state, lr):
+    def step_d(state, lr):
         """
         Performs D step of DEM, updating estimates of generalized states
         (mu_x_tildes) and generalized causes (mu_v_tildes).

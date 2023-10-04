@@ -14,16 +14,9 @@ import torch
 from jax import config
 config.update("jax_enable_x64", True)
 
-from hdm.dem.jax import (DEMInputJAX, DEMStateJAX, dem_step_d,
-                         dem_step_precision, dem_step_m, dem_step_e,
-                         dem_step_precision, dem_step,
-                         free_action)
+from dem.algo.jax.algo import (DEMInputJAX, DEMStateJAX)
 
-from hdm.dem.batched import DEMInputBatched, DEMStateBatched
-from hdm.dem.batched import dem_step_d as dem_step_d_b
-from hdm.dem.batched import dem_step_e as dem_step_e_b
-from hdm.dem.batched import dem_step_m as dem_step_m_b
-from hdm.dem.batched import dem_step_precision as dem_step_precision_b
+from dem.algo.torch.batched import DEMInputBatched, DEMStateBatched
 
 
 def compare_states_jax_torch(state_jax, state_torch):
@@ -83,10 +76,10 @@ def test_equivalence_jax_batched():
     from tabulate import tabulate
     from pathlib import Path
 
-    from hdm.core import iterate_generalized
-    from hdm.noise import autocorr_friston, noise_cov_gen_theoretical
-    from hdm.dem.util import extract_dynamic
-    from hdm.dummy import simulate_colored_lti
+    from dem.core import iterate_generalized
+    from dem.noise import autocorr_friston, noise_cov_gen_theoretical
+    from dem.algo.torch.util import extract_dynamic
+    from dem.dummy import simulate_colored_lti
 
     OUTPUT_DIR = Path('out/lti')
 
@@ -255,7 +248,7 @@ def test_equivalence_jax_batched():
 
     mu_v0_tilde = mu_v_tildes[0]
 
-    dem_input = DEMInputJAX(dt=dt, m_x=m_x, m_v=m_v, m_y=m_y, p=p, d=d, d_comp=p,
+    dem_input = DEMInputJAX(dt=dt, m_x=m_x, m_v=m_v, m_y=m_y, p=p, d=d,
                          ys=jnp.array(ys).astype(jnp.float64),
                          eta_v=jnp.array(vs).astype(jnp.float64),
                          p_v=p_v,
@@ -312,21 +305,21 @@ def test_equivalence_jax_batched():
     num_iter = 2
     for i in tqdm(range(num_iter), desc="Comparing JAX and PyTorch DEM trajectories"):
         print(f"{i}. Step D")
-        dem_step_d(dem_state, lr_dynamic)
-        dem_step_d_b(dem_state_b, lr_dynamic)
+        dem_state.step_d(lr_dynamic)
+        dem_state_b.step_d(lr_dynamic)
         assert compare_states_jax_torch(dem_state, dem_state_b)
 
         print(f"{i}. Step M")
-        dem_step_m(dem_state, lr_lambda, iter_lambda, min_improv=m_min_improv)
-        dem_step_m_b(dem_state_b, lr_lambda, iter_lambda, min_improv=m_min_improv)
+        dem_state.step_m(lr_lambda, iter_lambda, min_improv=m_min_improv)
+        dem_state_b.step_m(lr_lambda, iter_lambda, min_improv=m_min_improv)
         assert compare_states_jax_torch(dem_state, dem_state_b)
 
         print(f"{i}. Step E")
-        dem_step_e(dem_state, lr_theta)
-        dem_step_e_b(dem_state_b, lr_theta)
+        dem_state.step_e(lr_theta)
+        dem_state_b.step_e(lr_theta)
         assert compare_states_jax_torch(dem_state, dem_state_b)
 
         print(f"{i}. Step precision")
-        dem_step_precision(dem_state)
-        dem_step_precision_b(dem_state_b)
+        dem_state.dem_step_precision()
+        dem_state_b.dem_step_precision_b()
         assert compare_states_jax_torch(dem_state, dem_state_b)

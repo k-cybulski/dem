@@ -6,7 +6,7 @@ import jax.numpy as jnp
 from jax import jacrev as jacrev_builtin
 from jax import jacfwd as jacfwd_builtin
 from jax import hessian as hessian_builtin
-from hdm.dem.jax import jacrev_low_memory, jacfwd_low_memory, hessian_low_memory, jacfwd_low_memory_jit, hessian_low_memory_jit
+from dem.algo.jax.util import jacrev_low_memory, jacfwd_low_memory, hessian_low_memory, jacfwd_low_memory_jit, hessian_low_memory_jit
 
 @pytest.fixture
 def test_vec():
