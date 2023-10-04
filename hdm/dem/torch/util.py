@@ -19,16 +19,6 @@ def _fix_grad_shape(tensor):
     torch.autograd.functional.hessian. Transforms from dimension 4 to dimension
     2 just discarding two dimensions.
     """
-    # FIXME: Is this necessary? I'm not sure I understand the output shape of
-    # these functions.
-    # Their output shapes are a bit peculiar for our case. It has dimension 4.
-    # I'm guessing that this is because PyTorch can be very flexible in the
-    # input/output shapes, also considering cases like minibatches. For now,
-    # this solution *seems* to work (for no minibatches)
-
-    # It seems that if the parameters are a (n, 1) matrix, then the Hessian has
-    # 4 dimensions (n, 1, n, 1)
-    # if the parameters are a (n,) array, then the Hessian has 2 dimensions (n, n)
     if tensor.dim() == 2:
         return tensor
     elif tensor.dim() == 4 and tensor.shape[1] == 1 and tensor.shape[3] == 1:
@@ -66,3 +56,9 @@ def extract_dynamic(state):
     ts_all = torch.arange(state.input.n) * state.input.dt
     ts = ts_all[idx_first:idx_last]
     return mu_xs, sig_xs, mu_vs, sig_vs, ts
+
+def clear_gradients_on_state(state):
+    state.mu_theta = state.mu_theta.detach().clone().requires_grad_()
+    state.mu_lambda = state.mu_lambda.detach().clone().requires_grad_()
+    state.mu_x0_tilde = state.mu_x0_tilde.detach().clone().requires_grad_()
+    state.mu_v0_tilde = state.mu_v0_tilde.detach().clone().requires_grad_()
