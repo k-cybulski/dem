@@ -94,6 +94,7 @@ def jacrev_low_memory(f, batch_size):
         return J
     return jacfun
 
+
 def jacfwd_low_memory(f, batch_size):
     def jacfun(x):
         _jvp = lambda s: jvp(f, (x,), (s,))[1]
@@ -106,6 +107,7 @@ def jacfwd_low_memory(f, batch_size):
         Jt = jnp.concatenate(Jtr)
         return jnp.transpose(Jt)
     return jacfun
+
 
 def jacfwd_low_memory_jit(f):
     # The batching mechanism used in low_memory functions above relies upon
@@ -124,8 +126,10 @@ def jacfwd_low_memory_jit(f):
         return jnp.transpose(Jt)
     return jacfun
 
+
 def hessian_low_memory(f, outer=partial(jacfwd_low_memory, batch_size=3)):
     return outer(jacrev(f))
+
 
 def hessian_low_memory_jit(f):
     # just a special case of hessian_low_memory to ensure JIT-compatibility
@@ -264,21 +268,22 @@ def internal_energy_dynamic(
         else:
             return u_t
 
-    # It's reused a bunch of times, but maybe it should just be precomputed outside of this function
     out = _int_eng_dynamic(mu_x_tildes, mu_v_tildes, mu_theta, mu_lambda, diagnostic=diagnostic)
     if diagnostic:
         u_t, extr = out
     else:
         u_t = out
 
-    # NOTE: It seems more efficient to run `hessian` four times, once per each
-    # argument, rather than just run it once for all arguments at once
     if low_memory:
         hessian_func = hessian_low_memory_jit
     else:
         hessian_func = hessian
-    # FIXME: make it possible to use hessian_low_memory_jit below
-    # need to improve hessian_low_memory_jit to support the shapes of mu_x_tildes and mu_v_tildes
+    # NOTE: It seems more efficient to run `hessian` four times, once per each
+    # argument, rather than just run it once for all arguments at once
+
+    # FIXME: make it possible to use hessian_low_memory_jit below instead of jax.hessian
+    # need to improve hessian_low_memory_jit to support the shapes of
+    # mu_x_tildes and mu_v_tildes
     u_t_x_tilde_dd = hessian(lambda mu_x_tildes:
                              jnp.sum(_int_eng_dynamic(mu_x_tildes, mu_v_tildes, mu_theta, mu_lambda)))(mu_x_tildes)
     u_t_v_tilde_dd = hessian(lambda mu_v_tildes:
@@ -320,8 +325,9 @@ def internal_action(
         low_memory=False
         ):
     """
-    Computes internal energy/action, and hessians. Used to update precisions at the end of a
-    DEM iteration.
+    Computes internal energy/action, and hessians on parameter, hyperparameter,
+    and state estimates. Used to update precisions at the end of a DEM
+    iteration.
     """
     u, u_theta_dd, u_lambda_dd = internal_energy_static(
         mu_theta,
@@ -337,6 +343,7 @@ def internal_action(
         mu_lambda, omega_w, omega_z, noise_autocorr_inv, low_memory=low_memory)
     u += jnp.sum(u_t)
     return u, u_theta_dd, u_lambda_dd, u_t_x_tilde_dds, u_t_v_tilde_dds
+
 
 @jit
 def _batch_matmul_trace_sum(sig_tilde, u_t_tilde_dd):
@@ -636,10 +643,6 @@ class DEMStateJAX:
     sig_theta: ArrayImpl
     sig_lambda: ArrayImpl
 
-    # initial dynamic states
-    mu_x0_tilde: ArrayImpl
-    mu_v0_tilde: ArrayImpl
-
     def __post_init__(self):
         _verify_attr_dtypes(self, [
             "mu_x_tildes",
@@ -650,8 +653,6 @@ class DEMStateJAX:
             "mu_lambda",
             "sig_theta",
             "sig_lambda",
-            "mu_x0_tilde",
-            "mu_v0_tilde"
         ], dtype=self.input.dtype)
 
     def free_action(self, skip_constant=False, diagnostic=False):
@@ -725,7 +726,9 @@ class DEMStateJAX:
         x0 = x0.reshape(-1)
         assert len(x0) == input.m_x
 
+        # initialize all xs to 0
         mu_x0_tilde = jnp.concatenate([x0, jnp.zeros(input.p * input.m_x)]).reshape((-1, 1))
+        mu_x_tildes = jnp.concatenate([mu_x0_tilde[None], jnp.zeros((len(input.eta_v_tildes) - 1, (input.p + 1) * input.m_x, 1))])
         mu_v_tildes = input.eta_v_tildes.copy()
 
         # TODO: What is a good value here?
@@ -740,16 +743,14 @@ class DEMStateJAX:
 
         kwargs_default = dict(
                 input=input,
-                mu_x_tildes=mu_x0_tilde[None],
+                mu_x_tildes=mu_x_tildes,
                 mu_v_tildes=mu_v_tildes,
                 sig_x_tildes=sig_x_tildes,
                 sig_v_tildes=jnp.linalg.inv(input.p_v_tildes),
                 mu_theta=mu_theta,
                 mu_lambda=input.eta_lambda,
                 sig_theta=jnp.linalg.inv(input.p_theta),
-                sig_lambda=jnp.linalg.inv(input.p_lambda),
-                mu_x0_tilde=mu_x0_tilde,
-                mu_v0_tilde=mu_v_tildes[0]
+                sig_lambda=jnp.linalg.inv(input.p_lambda)
             )
         kwargs = {**kwargs_default, **kwargs}
 
@@ -804,27 +805,50 @@ def _dynamic_free_energy(
         noise_autocorr_inv=noise_autocorr_inv,
         skip_constant=True)
 
-def dem_step_d(state: DEMStateJAX, lr):
-    """
-    Performs the D step of DEM.
-    """
-    # In order to use fori_loop, we must precompute the shape of the output array
-    total_steps = len(state.input.y_tildes)
-    mu_x_tildes = jnp.concatenate([state.mu_x0_tilde[None],
-                                   jnp.zeros((total_steps - 1, state.input.m_x * (state.input.p + 1), 1))],
+@partial(jit, static_argnames=('m_x', 'm_v', 'p', 'd', 'gen_func_f', 'gen_func_g'))
+def _update_xv(m_x,
+                  m_v,
+                  p,
+                  d,
+                  mu_x_tildes,
+                  mu_v_tildes,
+                  sig_x_tildes,
+                  sig_v_tildes,
+                  y_tildes,
+                  eta_v_tildes,
+                  p_v_tildes,
+                  eta_theta,
+                  eta_lambda,
+                  p_theta,
+                  p_lambda,
+                  mu_theta,
+                  mu_lambda,
+                  sig_theta,
+                  sig_lambda,
+                  gen_func_g,
+                  gen_func_f,
+                  omega_w,
+                  omega_z,
+                  noise_autocorr_inv, dt, lr_dynamic):
+    dtype = y_tildes.dtype
+    total_steps = len(y_tildes)
+    mu_x0_tilde = mu_x_tildes[0]
+    mu_v0_tilde = mu_v_tildes[0]
+    mu_x_tildes = jnp.concatenate([mu_x0_tilde[None],
+                                   jnp.zeros((total_steps - 1, m_x * (p + 1), 1))],
                                   axis=0)
-    mu_v_tildes = jnp.concatenate([state.mu_v0_tilde[None],
-                                   jnp.zeros((total_steps - 1, state.input.m_v * (state.input.d + 1), 1))],
+    mu_v_tildes = jnp.concatenate([mu_v0_tilde[None],
+                                   jnp.zeros((total_steps - 1, m_v * (d + 1), 1))],
                                   axis=0)
-    deriv_mat_x = deriv_mat(state.input.p, state.input.m_x).astype(state.input.dtype)
-    deriv_mat_v = deriv_mat(state.input.d, state.input.m_v).astype(state.input.dtype)
+    deriv_mat_x = deriv_mat(p, m_x).astype(dtype)
+    deriv_mat_v = deriv_mat(d, m_v).astype(dtype)
 
     def d_step_iter(t, dynamic_state):
-        y_tilde = state.input.y_tildes[t]
-        sig_x_tilde = state.sig_x_tildes[t]
-        sig_v_tilde = state.sig_v_tildes[t]
-        eta_v_tilde = state.input.eta_v_tildes[t]
-        p_v_tilde = state.input.p_v_tildes[t]
+        y_tilde = y_tildes[t]
+        sig_x_tilde = sig_x_tildes[t]
+        sig_v_tilde = sig_v_tildes[t]
+        eta_v_tilde = eta_v_tildes[t]
+        p_v_tilde = p_v_tildes[t]
         mu_x_tildes, mu_v_tildes = dynamic_state
         mu_x_tilde_t = mu_x_tildes[t]
         mu_v_tilde_t = mu_v_tildes[t]
@@ -833,70 +857,70 @@ def dem_step_d(state: DEMStateJAX, lr):
         x_d_raw, v_d_raw = grad(_dynamic_free_energy, argnums=(0,1))(mu_x_tilde_t, mu_v_tilde_t, y_tilde,
             sig_x_tilde, sig_v_tilde,
             eta_v_tilde, p_v_tilde,
-            m_x=state.input.m_x,
-            m_v=state.input.m_v,
-            p=state.input.p,
-            d=state.input.d,
-            eta_theta=state.input.eta_theta,
-            eta_lambda=state.input.eta_lambda,
-            p_theta=state.input.p_theta,
-            p_lambda=state.input.p_lambda,
-            mu_theta=state.mu_theta,
-            mu_lambda=state.mu_lambda,
-            sig_theta=state.sig_theta,
-            sig_lambda=state.sig_lambda,
-            gen_func_g=state.input.gen_func_g,
-            gen_func_f=state.input.gen_func_f,
-            omega_w=state.input.omega_w,
-            omega_z=state.input.omega_z,
-            noise_autocorr_inv=state.input.noise_autocorr_inv)
+            m_x=m_x,
+            m_v=m_v,
+            p=p,
+            d=d,
+            eta_theta=eta_theta,
+            eta_lambda=eta_lambda,
+            p_theta=p_theta,
+            p_lambda=p_lambda,
+            mu_theta=mu_theta,
+            mu_lambda=mu_lambda,
+            sig_theta=sig_theta,
+            sig_lambda=sig_lambda,
+            gen_func_g=gen_func_g,
+            gen_func_f=gen_func_f,
+            omega_w=omega_w,
+            omega_z=omega_z,
+            noise_autocorr_inv=noise_autocorr_inv)
         # NOTE: In the original pseudocode, x and v are in one vector
-        x_d = deriv_mat_x @ mu_x_tilde_t + lr * x_d_raw
-        v_d = deriv_mat_v @ mu_v_tilde_t + lr * v_d_raw
-        x_dd = lr * hessian(_dynamic_free_energy, argnums=0)(mu_x_tilde_t, mu_v_tilde_t, y_tilde,
+        x_d = deriv_mat_x @ mu_x_tilde_t + lr_dynamic * x_d_raw
+        v_d = deriv_mat_v @ mu_v_tilde_t + lr_dynamic * v_d_raw
+        x_dd = lr_dynamic * hessian(_dynamic_free_energy, argnums=0)(mu_x_tilde_t, mu_v_tilde_t, y_tilde,
             sig_x_tilde, sig_v_tilde,
             eta_v_tilde, p_v_tilde,
-            m_x=state.input.m_x,
-            m_v=state.input.m_v,
-            p=state.input.p,
-            d=state.input.d,
-            eta_theta=state.input.eta_theta,
-            eta_lambda=state.input.eta_lambda,
-            p_theta=state.input.p_theta,
-            p_lambda=state.input.p_lambda,
-            mu_theta=state.mu_theta,
-            mu_lambda=state.mu_lambda,
-            sig_theta=state.sig_theta,
-            sig_lambda=state.sig_lambda,
-            gen_func_g=state.input.gen_func_g,
-            gen_func_f=state.input.gen_func_f,
-            omega_w=state.input.omega_w,
-            omega_z=state.input.omega_z,
-            noise_autocorr_inv=state.input.noise_autocorr_inv)
-        v_dd = lr * hessian(_dynamic_free_energy, argnums=1)(mu_x_tilde_t, mu_v_tilde_t, y_tilde,
+            m_x=m_x,
+            m_v=m_v,
+            p=p,
+            d=d,
+            eta_theta=eta_theta,
+            eta_lambda=eta_lambda,
+            p_theta=p_theta,
+            p_lambda=p_lambda,
+            mu_theta=mu_theta,
+            mu_lambda=mu_lambda,
+            sig_theta=sig_theta,
+            sig_lambda=sig_lambda,
+            gen_func_g=gen_func_g,
+            gen_func_f=gen_func_f,
+            omega_w=omega_w,
+            omega_z=omega_z,
+            noise_autocorr_inv=noise_autocorr_inv)
+        v_dd = lr_dynamic * hessian(_dynamic_free_energy, argnums=1)(mu_x_tilde_t, mu_v_tilde_t, y_tilde,
             sig_x_tilde, sig_v_tilde,
             eta_v_tilde, p_v_tilde,
-            m_x=state.input.m_x,
-            m_v=state.input.m_v,
-            p=state.input.p,
-            d=state.input.d,
-            eta_theta=state.input.eta_theta,
-            eta_lambda=state.input.eta_lambda,
-            p_theta=state.input.p_theta,
-            p_lambda=state.input.p_lambda,
-            mu_theta=state.mu_theta,
-            mu_lambda=state.mu_lambda,
-            sig_theta=state.sig_theta,
-            sig_lambda=state.sig_lambda,
-            gen_func_g=state.input.gen_func_g,
-            gen_func_f=state.input.gen_func_f,
-            omega_w=state.input.omega_w,
-            omega_z=state.input.omega_z,
-            noise_autocorr_inv=state.input.noise_autocorr_inv)
+            m_x=m_x,
+            m_v=m_v,
+            p=p,
+            d=d,
+            eta_theta=eta_theta,
+            eta_lambda=eta_lambda,
+            p_theta=p_theta,
+            p_lambda=p_lambda,
+            mu_theta=mu_theta,
+            mu_lambda=mu_lambda,
+            sig_theta=sig_theta,
+            sig_lambda=sig_lambda,
+            gen_func_g=gen_func_g,
+            gen_func_f=gen_func_f,
+            omega_w=omega_w,
+            omega_z=omega_z,
+            noise_autocorr_inv=noise_autocorr_inv)
         x_dd = deriv_mat_x + _fix_grad_shape(x_dd)
         v_dd = deriv_mat_v + _fix_grad_shape(v_dd)
-        step_matrix_x = (jsp.linalg.expm(x_dd * state.input.dt, max_squarings=MATRIX_EXPM_MAX_SQUARINGS) - jnp.eye(x_dd.shape[0], dtype=state.input.dtype)) @ jnp.linalg.inv(x_dd)
-        step_matrix_v = (jsp.linalg.expm(v_dd * state.input.dt, max_squarings=MATRIX_EXPM_MAX_SQUARINGS) - jnp.eye(v_dd.shape[0], dtype=state.input.dtype)) @ jnp.linalg.inv(v_dd)
+        step_matrix_x = (jsp.linalg.expm(x_dd * dt, max_squarings=MATRIX_EXPM_MAX_SQUARINGS) - jnp.eye(x_dd.shape[0], dtype=dtype)) @ jnp.linalg.inv(x_dd)
+        step_matrix_v = (jsp.linalg.expm(v_dd * dt, max_squarings=MATRIX_EXPM_MAX_SQUARINGS) - jnp.eye(v_dd.shape[0], dtype=dtype)) @ jnp.linalg.inv(v_dd)
         mu_x_tilde_tp1 = mu_x_tilde_t + step_matrix_x @ x_d
         mu_v_tilde_tp1 = mu_v_tilde_t + step_matrix_v @ v_d
 
@@ -904,13 +928,41 @@ def dem_step_d(state: DEMStateJAX, lr):
         mu_v_tildes = mu_v_tildes.at[t+1].set(mu_v_tilde_tp1)
         return (mu_x_tildes, mu_v_tildes)
 
-    mu_x_tildes, mu_v_tildes = fori_loop(0, len(state.input.y_tildes) - 1, d_step_iter, (mu_x_tildes, mu_v_tildes))
-    state.mu_x_tildes = mu_x_tildes
-    state.mu_v_tildes = mu_v_tildes
+    return fori_loop(0, len(y_tildes) - 1, d_step_iter, (mu_x_tildes, mu_v_tildes))
+
+
+def dem_step_d(state: DEMStateJAX, lr_dynamic):
+    """
+    Performs the D step of DEM.
+    """
+    state.mu_x_tildes, state.mu_v_tildes = _update_xv(m_x=state.input.m_x,
+                  m_v=state.input.m_v,
+                  p=state.input.p,
+                  d=state.input.d,
+                  mu_x_tildes=state.mu_x_tildes,
+                  mu_v_tildes=state.mu_v_tildes,
+                  sig_x_tildes=state.sig_x_tildes,
+                  sig_v_tildes=state.sig_v_tildes,
+                  y_tildes=state.input.y_tildes,
+                  eta_v_tildes=state.input.eta_v_tildes,
+                  p_v_tildes=state.input.p_v_tildes,
+                  eta_theta=state.input.eta_theta,
+                  eta_lambda=state.input.eta_lambda,
+                  p_theta=state.input.p_theta,
+                  p_lambda=state.input.p_lambda,
+                  mu_theta=state.mu_theta,
+                  mu_lambda=state.mu_lambda,
+                  sig_theta=state.sig_theta,
+                  sig_lambda=state.sig_lambda,
+                  gen_func_g=state.input.gen_func_g,
+                  gen_func_f=state.input.gen_func_f,
+                  omega_w=state.input.omega_w,
+                  omega_z=state.input.omega_z,
+                  noise_autocorr_inv=state.input.noise_autocorr_inv, dt=state.input.dt, lr_dynamic=lr_dynamic)
 
 
 @partial(jit, static_argnames=('m_x', 'm_v', 'p', 'd', 'gen_func_f', 'gen_func_g', 'low_memory'))
-def _precision_update(
+def _update_precision(
         mu_theta,
         mu_lambda,
         eta_theta,
@@ -961,7 +1013,7 @@ def dem_step_precision(state: DEMStateJAX, low_memory=False):
     """
     Does a precision update of DEM.
     """
-    state.sig_theta, state.sig_lambda, state.sig_x_tildes, state.sig_v_tildes = _precision_update(
+    state.sig_theta, state.sig_lambda, state.sig_x_tildes, state.sig_v_tildes = _update_precision(
                 mu_theta=state.mu_theta,
                 mu_lambda=state.mu_lambda,
                 eta_theta=state.input.eta_theta,
@@ -989,7 +1041,7 @@ def dem_step_precision(state: DEMStateJAX, low_memory=False):
 
 
 @partial(jit, static_argnames=('m_x', 'm_v', 'p', 'd', 'gen_func_f', 'gen_func_g', 'iter_lambda'))
-def _lambda_update(m_x,
+def _update_lambda(m_x,
                   m_v,
                   p,
                   d,
@@ -1064,7 +1116,7 @@ def dem_step_m(state: DEMStateJAX, lr_lambda, iter_lambda, min_improv):
     """
     Performs the noise hyperparameter update (step M) of DEM.
     """
-    state.mu_lambda = _lambda_update(m_x=state.input.m_x,
+    state.mu_lambda = _update_lambda(m_x=state.input.m_x,
         m_v=state.input.m_v,
         p=state.input.p,
         d=state.input.d,
@@ -1093,7 +1145,7 @@ def dem_step_m(state: DEMStateJAX, lr_lambda, iter_lambda, min_improv):
 
 
 @partial(jit, static_argnames=('m_x', 'm_v', 'p', 'd', 'gen_func_f', 'gen_func_g', 'low_memory'))
-def _theta_update(m_x,
+def _update_theta(m_x,
                   m_v,
                   p,
                   d,
@@ -1161,7 +1213,7 @@ def dem_step_e(state: DEMStateJAX, lr_theta, low_memory=True):
     """
     Performs the parameter update (step E) of DEM.
     """
-    state.mu_theta = _theta_update(m_x=state.input.m_x,
+    state.mu_theta = _update_theta(m_x=state.input.m_x,
                   m_v=state.input.m_v,
                   p=state.input.p,
                   d=state.input.d,
