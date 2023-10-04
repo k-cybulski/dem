@@ -328,7 +328,7 @@ def free_action(
 # Part 2: Implementation of DEM
 
 @dataclass
-class DEMInput:
+class DEMInputNaive:
     """
     The input to DEM. It consists of data, priors, starting values, and
     transition functions. It consists of all the things which remain fixed over
@@ -342,9 +342,10 @@ class DEMInput:
     m_x: int
     m_v: int
     m_y: int
-    # how many derivatives to track
-    p: int
+    # embedding order, i.e. how many derivatives to track
+    p: int # for states
     p_comp: int # can be equal to p or greater
+    d: int # for inputs
 
     # system output
     ys: torch.Tensor
@@ -395,13 +396,13 @@ class DEMInput:
 
 
 @dataclass
-class DEMState:
+class DEMStateNaive:
     """
     Keeps track of the current state of a DEM model. Contains its state,
     parameter, and hyperparameter estimates.
     """
     # system input
-    input: DEMInput
+    input: DEMInputNaive
 
     # dynamic state estimates
     # FIXME (OPT): These should be put in a single tensor for batched operations
@@ -421,7 +422,8 @@ class DEMState:
     mu_v0_tilde: torch.Tensor
 
 
-def free_action_from_state(state: DEMState):
+
+def free_action_from_state(state: DEMStateNaive):
     return free_action(
             m_x=state.input.m_x,
             m_v=state.input.m_v,
@@ -447,7 +449,7 @@ def free_action_from_state(state: DEMState):
             omega_z=state.input.omega_z,
             noise_autocorr_inv=state.input.noise_autocorr_inv)
 
-def internal_action_from_state(state: DEMState):
+def internal_action_from_state(state: DEMStateNaive):
     return internal_action(
             # for static internal energy
             mu_theta=state.mu_theta,
@@ -475,14 +477,14 @@ def internal_action_from_state(state: DEMState):
             omega_z=state.input.omega_z,
             noise_autocorr_inv=state.input.noise_autocorr_inv)
 
-def clear_gradients_on_state(state: DEMState):
+def clear_gradients_on_state(state: DEMStateNaive):
     state.mu_theta = state.mu_theta.detach().clone().requires_grad_()
     state.mu_lambda = state.mu_lambda.detach().clone().requires_grad_()
     state.mu_x0_tilde = state.mu_x0_tilde.detach().clone().requires_grad_()
     state.mu_v0_tilde = state.mu_v0_tilde.detach().clone().requires_grad_()
 
 
-def dem_step_d(state: DEMState, lr, benchmark=False):
+def dem_step_d(state: DEMStateNaive, lr, benchmark=False):
     """
     Performs the D step of DEM.
     """
@@ -492,7 +494,7 @@ def dem_step_d(state: DEMState, lr, benchmark=False):
     mu_x_tildes = [mu_x_tilde_t]
     mu_v_tildes = [mu_v_tilde_t]
     deriv_mat_x = torch.from_numpy(deriv_mat(state.input.p, state.input.m_x)).to(dtype=torch.float32)
-    deriv_mat_v = torch.from_numpy(deriv_mat(state.input.p, state.input.m_v)).to(dtype=torch.float32)
+    deriv_mat_v = torch.from_numpy(deriv_mat(state.input.d, state.input.m_v)).to(dtype=torch.float32)
     if benchmark:
         benchmark_t0 = time()
         benchmark_ts = []
@@ -563,7 +565,7 @@ def dem_step_d(state: DEMState, lr, benchmark=False):
     if benchmark:
         return benchmark_ts
 
-def dem_step_m(state: DEMState, lr_lambda, iter_lambda, min_improv, benchmark=False):
+def dem_step_m(state: DEMStateNaive, lr_lambda, iter_lambda, min_improv, benchmark=False):
     """
     Performs the noise hyperparameter update (step M) of DEM.
     """
@@ -594,7 +596,7 @@ def dem_step_m(state: DEMState, lr_lambda, iter_lambda, min_improv, benchmark=Fa
         return benchmark_ts
 
 
-def dem_step_e(state: DEMState, lr_theta):
+def dem_step_e(state: DEMStateNaive, lr_theta):
     """
     Performs the parameter update (step E) of DEM.
     """
@@ -610,7 +612,7 @@ def dem_step_e(state: DEMState, lr_theta):
     state.mu_theta = state.mu_theta + step_matrix @ theta_d
 
 
-def dem_step_ex0(state: DEMState, lr_theta):
+def dem_step_ex0(state: DEMStateNaive, lr_theta):
     """
     Performs the parameter update (step E) of DEM together with an update of v0
     and x0 (not in the original algorithm).
@@ -658,7 +660,7 @@ def dem_step_ex0(state: DEMState, lr_theta):
     state.mu_v_tildes[0] = state.mu_v0_tilde
 
 
-def dem_step_precision(state: DEMState):
+def dem_step_precision(state: DEMStateNaive):
     """
     Does a precision update of DEM.
     """
@@ -670,7 +672,7 @@ def dem_step_precision(state: DEMState):
     state.sig_v_tildes = [-torch.linalg.inv(u_t_v_tilde_dd) for u_t_v_tilde_dd in u_t_v_tilde_dds]
 
 
-def dem_step(state: DEMState, lr_dynamic, lr_theta, lr_lambda, iter_lambda, m_min_improv=0.01, update_x0=True, benchmark=False):
+def dem_step(state: DEMStateNaive, lr_dynamic, lr_theta, lr_lambda, iter_lambda, m_min_improv=0.01, update_x0=True, benchmark=False):
     """
     Does an iteration of DEM.
     """
