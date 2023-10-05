@@ -1,5 +1,7 @@
 """
-Tests for checking equivalence between implementations.
+Tests for checking equivalence between implementations by running some
+iterations of them. Right now, only a comparison between JAX and the batched
+Torch implementation is done.
 """
 
 from pathlib import Path
@@ -13,7 +15,6 @@ from dem.core import iterate_generalized
 from dem.dummy import simulate_colored_lti
 from dem.noise import autocorr_friston, noise_cov_gen_theoretical
 from jax import config, jit, vmap
-from tqdm import tqdm
 
 config.update("jax_enable_x64", True)
 
@@ -348,24 +349,39 @@ def test_equivalence_jax_batched():
     lr_lambda = 1
     iter_lambda = 8  # from the matlab code
     m_min_improv = 0.01
-    num_iter = 2
-    for i in tqdm(range(num_iter), desc="Comparing JAX and PyTorch DEM trajectories"):
-        print(f"{i}. Step D")
-        dem_state.step_d(lr_dynamic)
-        dem_state_b.step_d(lr_dynamic)
-        assert compare_states_jax_torch(dem_state, dem_state_b)
+    print("Step D")
+    dem_state.step_d(lr_dynamic)
+    dem_state_b.step_d(lr_dynamic)
+    assert compare_states_jax_torch(dem_state, dem_state_b)
 
-        print(f"{i}. Step M")
-        dem_state.step_m(lr_lambda, iter_lambda, min_improv=m_min_improv)
-        dem_state_b.step_m(lr_lambda, iter_lambda, min_improv=m_min_improv)
-        assert compare_states_jax_torch(dem_state, dem_state_b)
+    print("Step M")
+    dem_state.step_m(lr_lambda, iter_lambda, min_improv=m_min_improv)
+    dem_state_b.step_m(lr_lambda, iter_lambda, min_improv=m_min_improv)
+    assert compare_states_jax_torch(dem_state, dem_state_b)
 
-        print(f"{i}. Step E")
-        dem_state.step_e(lr_theta)
-        dem_state_b.step_e(lr_theta)
-        assert compare_states_jax_torch(dem_state, dem_state_b)
+    print("Step E")
+    dem_state.step_e(lr_theta)
+    dem_state_b.step_e(lr_theta)
+    assert compare_states_jax_torch(dem_state, dem_state_b)
 
-        print(f"{i}. Step precision")
-        dem_state.step_precision()
-        dem_state_b.step_precision()
-        assert compare_states_jax_torch(dem_state, dem_state_b)
+    print("Step precision")
+    dem_state.step_precision()
+    dem_state_b.step_precision()
+    assert compare_states_jax_torch(dem_state, dem_state_b)
+
+    print("Step of DEM")
+    dem_state.step(
+        lr_dynamic=lr_dynamic,
+        lr_theta=lr_theta,
+        lr_lambda=lr_lambda,
+        m_min_improv=m_min_improv,
+        iter_lambda=iter_lambda,
+    )
+    dem_state_b.step(
+        lr_dynamic=lr_dynamic,
+        lr_theta=lr_theta,
+        lr_lambda=lr_lambda,
+        m_min_improv=m_min_improv,
+        iter_lambda=iter_lambda,
+    )
+    assert compare_states_jax_torch(dem_state, dem_state_b)
