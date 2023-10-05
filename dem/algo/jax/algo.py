@@ -6,20 +6,21 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import Callable
 
-import jax.numpy as jnp
-import jax.scipy as jsp
 import numpy as np
-# DEM experiments often involve extremely high priors, which do not work well
-# with single precision float32
-from jax import config, grad, hessian, jacfwd, jit, value_and_grad, vmap
-from jax.lax import fori_loop, while_loop
 from jaxlib.xla_extension import ArrayImpl
 
-config.update("jax_enable_x64", True)
+import jax.numpy as jnp
+import jax.scipy as jsp
+from jax import config, grad, hessian, jacfwd, jit, value_and_grad, vmap
+from jax.lax import fori_loop, while_loop
 
 from ...core import iterate_generalized
 from ...noise import autocorr_friston, noise_cov_gen_theoretical
 from .util import _fix_grad_shape, deriv_mat, hessian_low_memory_jit, logdet
+
+# DEM experiments often involve extremely high priors, which do not work well
+# with single precision float32
+config.update("jax_enable_x64", True)
 
 MATRIX_EXPM_MAX_SQUARINGS = 100
 
@@ -578,6 +579,7 @@ def _dynamic_free_energy(
     omega_w,
     omega_z,
     noise_autocorr_inv,
+    low_memory,
 ):
     """Computes the dynamic parts of free energy based on variables at a given
     point in time."""
@@ -607,10 +609,14 @@ def _dynamic_free_energy(
         omega_z=omega_z,
         noise_autocorr_inv=noise_autocorr_inv,
         skip_constant=True,
+        low_memory=low_memory,
     )
 
 
-@partial(jit, static_argnames=("m_x", "m_v", "p", "d", "gen_func_f", "gen_func_g"))
+@partial(
+    jit,
+    static_argnames=("m_x", "m_v", "p", "d", "gen_func_f", "gen_func_g", "low_memory"),
+)
 def _update_xv(
     m_x,
     m_v,
@@ -638,6 +644,7 @@ def _update_xv(
     noise_autocorr_inv,
     dt,
     lr_dynamic,
+    low_memory,
 ):
     dtype = y_tildes.dtype
     total_steps = len(y_tildes)
@@ -688,6 +695,7 @@ def _update_xv(
             omega_w=omega_w,
             omega_z=omega_z,
             noise_autocorr_inv=noise_autocorr_inv,
+            low_memory=low_memory,
         )
         # NOTE: In the original pseudocode, x and v are in one vector
         x_d = deriv_mat_x @ mu_x_tilde_t + lr_dynamic * x_d_raw
@@ -717,6 +725,7 @@ def _update_xv(
             omega_w=omega_w,
             omega_z=omega_z,
             noise_autocorr_inv=noise_autocorr_inv,
+            low_memory=low_memory,
         )
         v_dd = lr_dynamic * hessian(_dynamic_free_energy, argnums=1)(
             mu_x_tilde_t,
@@ -743,6 +752,7 @@ def _update_xv(
             omega_w=omega_w,
             omega_z=omega_z,
             noise_autocorr_inv=noise_autocorr_inv,
+            low_memory=low_memory,
         )
         x_dd = deriv_mat_x + _fix_grad_shape(x_dd)
         v_dd = deriv_mat_v + _fix_grad_shape(v_dd)
@@ -827,7 +837,16 @@ def _update_precision(
 
 @partial(
     jit,
-    static_argnames=("m_x", "m_v", "p", "d", "gen_func_f", "gen_func_g", "iter_lambda"),
+    static_argnames=(
+        "m_x",
+        "m_v",
+        "p",
+        "d",
+        "gen_func_f",
+        "gen_func_g",
+        "iter_lambda",
+        "low_memory",
+    ),
 )
 def _update_lambda(
     m_x,
@@ -857,6 +876,7 @@ def _update_lambda(
     lr_lambda,
     iter_lambda,
     min_improv,
+    low_memory,
 ):
     def lambda_free_action(mu_lambda):
         # free action as a function of lambda
@@ -886,6 +906,7 @@ def _update_lambda(
             omega_z=omega_z,
             noise_autocorr_inv=noise_autocorr_inv,
             skip_constant=False,
+            low_memory=low_memory,
         )
 
     init_args = (0, -jnp.inf, -jnp.inf, mu_lambda)
@@ -969,6 +990,7 @@ def _update_theta(
             omega_z=omega_z,
             noise_autocorr_inv=noise_autocorr_inv,
             skip_constant=False,
+            low_memory=low_memory,
         )
 
     theta_d_raw = grad(theta_free_action)(mu_theta)
@@ -985,6 +1007,302 @@ def _update_theta(
         - jnp.eye(theta_dd.shape[0], dtype=mu_theta.dtype)
     ) @ jnp.linalg.inv(theta_dd)
     return mu_theta + step_matrix @ theta_d
+
+
+@partial(
+    jit,
+    static_argnames=(
+        "m_x",
+        "m_v",
+        "p",
+        "d",
+        "gen_func_f",
+        "gen_func_g",
+        "iter_lambda",
+        "low_memory_d",
+        "low_memory_e",
+        "low_memory_m",
+        "low_memory_precision",
+    ),
+)
+def _update_all(
+    m_x,
+    m_v,
+    p,
+    d,
+    mu_x_tildes,
+    mu_v_tildes,
+    sig_x_tildes,
+    sig_v_tildes,
+    y_tildes,
+    eta_v_tildes,
+    p_v_tildes,
+    eta_theta,
+    eta_lambda,
+    p_theta,
+    p_lambda,
+    mu_theta,
+    mu_lambda,
+    sig_theta,
+    sig_lambda,
+    gen_func_g,
+    gen_func_f,
+    omega_w,
+    omega_z,
+    noise_autocorr_inv,
+    dt,
+    lr_dynamic,
+    lr_theta,
+    lr_lambda,
+    iter_lambda,
+    m_min_improv,
+    low_memory_d=False,
+    low_memory_e=True,
+    low_memory_m=False,
+    low_memory_precision=False,
+):
+    # Does a single step of DEM
+    # D step
+    mu_x_tildes, mu_v_tildes = _update_xv(
+        m_x,
+        m_v,
+        p,
+        d,
+        mu_x_tildes,
+        mu_v_tildes,
+        sig_x_tildes,
+        sig_v_tildes,
+        y_tildes,
+        eta_v_tildes,
+        p_v_tildes,
+        eta_theta,
+        eta_lambda,
+        p_theta,
+        p_lambda,
+        mu_theta,
+        mu_lambda,
+        sig_theta,
+        sig_lambda,
+        gen_func_g,
+        gen_func_f,
+        omega_w,
+        omega_z,
+        noise_autocorr_inv,
+        dt,
+        lr_dynamic,
+        low_memory=low_memory_d,
+    )
+    # M step
+    mu_lambda = _update_lambda(
+        m_x,
+        m_v,
+        p,
+        d,
+        mu_x_tildes,
+        mu_v_tildes,
+        sig_x_tildes,
+        sig_v_tildes,
+        y_tildes,
+        eta_v_tildes,
+        p_v_tildes,
+        eta_theta,
+        eta_lambda,
+        p_theta,
+        p_lambda,
+        mu_theta,
+        mu_lambda,
+        sig_theta,
+        sig_lambda,
+        gen_func_g,
+        gen_func_f,
+        omega_w,
+        omega_z,
+        noise_autocorr_inv,
+        lr_lambda,
+        iter_lambda,
+        m_min_improv,
+        low_memory=low_memory_m,
+    )
+    # E step
+    mu_theta = _update_theta(
+        m_x,
+        m_v,
+        p,
+        d,
+        mu_x_tildes,
+        mu_v_tildes,
+        sig_x_tildes,
+        sig_v_tildes,
+        y_tildes,
+        eta_v_tildes,
+        p_v_tildes,
+        eta_theta,
+        eta_lambda,
+        p_theta,
+        p_lambda,
+        mu_theta,
+        mu_lambda,
+        sig_theta,
+        sig_lambda,
+        gen_func_g,
+        gen_func_f,
+        omega_w,
+        omega_z,
+        noise_autocorr_inv,
+        lr_theta,
+        low_memory=low_memory_e,
+    )
+
+    # Precision update step
+    sig_theta, sig_lambda, sig_x_tildes, sig_v_tildes = _update_precision(
+        mu_theta,
+        mu_lambda,
+        eta_theta,
+        eta_lambda,
+        p_theta,
+        p_lambda,
+        gen_func_f,
+        gen_func_g,
+        m_x,
+        m_v,
+        p,
+        d,
+        mu_x_tildes,
+        mu_v_tildes,
+        sig_x_tildes,
+        sig_v_tildes,
+        y_tildes,
+        eta_v_tildes,
+        p_v_tildes,
+        omega_w,
+        omega_z,
+        noise_autocorr_inv,
+        low_memory=low_memory_precision,
+    )
+
+    return (
+        mu_x_tildes,
+        mu_v_tildes,
+        sig_x_tildes,
+        sig_v_tildes,
+        mu_theta,
+        mu_lambda,
+        sig_theta,
+        sig_lambda,
+    )
+
+
+@partial(
+    jit,
+    static_argnames=(
+        "m_x",
+        "m_v",
+        "p",
+        "d",
+        "gen_func_f",
+        "gen_func_g",
+        "low_memory",
+        "iter_dem",
+        "iter_lambda",
+    ),
+)
+def _update_all_loop(
+    m_x,
+    m_v,
+    p,
+    d,
+    mu_x_tildes,
+    mu_v_tildes,
+    sig_x_tildes,
+    sig_v_tildes,
+    y_tildes,
+    eta_v_tildes,
+    p_v_tildes,
+    eta_theta,
+    eta_lambda,
+    p_theta,
+    p_lambda,
+    mu_theta,
+    mu_lambda,
+    sig_theta,
+    sig_lambda,
+    gen_func_g,
+    gen_func_f,
+    omega_w,
+    omega_z,
+    noise_autocorr_inv,
+    dt,
+    lr_dynamic,
+    lr_theta,
+    lr_lambda,
+    iter_lambda,
+    m_min_improv,
+    low_memory_d,
+    low_memory_e,
+    low_memory_m,
+    low_memory_precision,
+    iter_dem,
+):
+    init_val = (
+        mu_x_tildes,
+        mu_v_tildes,
+        sig_x_tildes,
+        sig_v_tildes,
+        mu_theta,
+        mu_lambda,
+        sig_theta,
+        sig_lambda,
+    )
+
+    def _state_update(t, val):
+        (
+            mu_x_tildes,
+            mu_v_tildes,
+            sig_x_tildes,
+            sig_v_tildes,
+            mu_theta,
+            mu_lambda,
+            sig_theta,
+            sig_lambda,
+        ) = val
+        return _update_all(
+            m_x,
+            m_v,
+            p,
+            d,
+            mu_x_tildes,
+            mu_v_tildes,
+            sig_x_tildes,
+            sig_v_tildes,
+            y_tildes,
+            eta_v_tildes,
+            p_v_tildes,
+            eta_theta,
+            eta_lambda,
+            p_theta,
+            p_lambda,
+            mu_theta,
+            mu_lambda,
+            sig_theta,
+            sig_lambda,
+            gen_func_g,
+            gen_func_f,
+            omega_w,
+            omega_z,
+            noise_autocorr_inv,
+            dt,
+            lr_dynamic,
+            lr_theta,
+            lr_lambda,
+            iter_lambda,
+            m_min_improv,
+            low_memory_d=low_memory_d,
+            low_memory_e=low_memory_e,
+            low_memory_m=low_memory_m,
+            low_memory_precision=low_memory_precision,
+        )
+
+    return fori_loop(0, iter_dem, _state_update, init_val)
 
 
 ##
@@ -1376,7 +1694,7 @@ class DEMStateJAX:
 
         return cls(**kwargs)
 
-    def step_d(state, lr_dynamic=1):
+    def step_d(state, lr_dynamic=1, low_memory=False):
         """
         Performs D step of DEM, updating estimates of generalized states
         (mu_x_tildes) and generalized causes (mu_v_tildes).
@@ -1411,6 +1729,7 @@ class DEMStateJAX:
             noise_autocorr_inv=state.input.noise_autocorr_inv,
             dt=state.input.dt,
             lr_dynamic=lr_dynamic,
+            low_memory=low_memory,
         )
 
     def step_e(state, lr_theta, low_memory=True):
@@ -1452,7 +1771,7 @@ class DEMStateJAX:
         )
         # TODO: should be an if statement comparing new f_bar with old
 
-    def step_m(state, lr_lambda, iter_lambda=8, min_improv=0.01):
+    def step_m(state, lr_lambda, iter_lambda=8, min_improv=0.01, low_memory=False):
         """
         Performs the M step of DEM, updating hyperparameter estimates
         (mu_lambda).
@@ -1490,6 +1809,7 @@ class DEMStateJAX:
             lr_lambda=lr_lambda,
             iter_lambda=iter_lambda,
             min_improv=min_improv,
+            low_memory=low_memory,
         )
 
     def step_precision(state, low_memory=False):
@@ -1532,67 +1852,120 @@ class DEMStateJAX:
             low_memory=low_memory,
         )
 
-    def step(state, lr_dynamic, lr_theta, lr_lambda, iter_lambda, m_min_improv=0.01):
+    def step(
+        state,
+        lr_dynamic,
+        lr_theta,
+        lr_lambda,
+        iter_lambda,
+        m_min_improv=0.01,
+        low_memory_d=False,
+        low_memory_e=True,
+        low_memory_m=False,
+        low_memory_precision=False,
+    ):
         """
         Does one complete step of DEM, which includes the D, E, M, and
-        precision update steps, in order following [1]
+        precision update steps, in order following [1].
+
+        Args:
+            lr_dynamic (float): learning rate
+            lr_theta (float): learning rate
+            lr_lambda (float): learning rate
+            iter_lambda (int): maximum number of iterations
+            m_min_improv (float): minimum improvement before assuming convergence
+            low_memory (bool): Whether to use a low-memory but slow method for
+                computing hessians.
 
         [1] A. Anil Meera and M. Wisse, “Dynamic Expectation Maximization Algorithm
             for Estimation of Linear Systems with Colored Noise,” Entropy
             (Basel), vol. 23, no. 10, p. 1306, Oct. 2021, doi: 10.3390/e23101306.
         """
-        state.step_d(state, lr_dynamic)
-        state.step_m(state, lr_lambda, iter_lambda, min_improv=m_min_improv)
-        state.step_e(state, lr_theta)
-        state.step_precision(state)
+        self.run(
+            iter_dem=1,
+            lr_dynamic=lr_dynamic,
+            lr_theta=lr_theta,
+            lr_lambda=lr_lambda,
+            iter_lambda=iter_lambda,
+            m_min_improv=m_min_improv,
+            low_memory_d=low_memory_d,
+            low_memory_e=low_memory_e,
+            low_memory_m=low_memory_m,
+            low_memory_precision=low_memory_precision,
+        )
 
+    def run(
+        state,
+        lr_dynamic,
+        lr_theta,
+        lr_lambda,
+        iter_lambda,
+        iter_dem,
+        m_min_improv=0.01,
+        low_memory_d=False,
+        low_memory_e=True,
+        low_memory_m=False,
+        low_memory_precision=False,
+    ):
+        """
+        Runs the DEM procedure for a number of steps.
 
-# def dem_step_d(state: DEMStateJAX, lr_dynamic):
-#     """
-#     Performs the D step of DEM.
-#     """
-#     state.step_d(lr_dynamic=lr_dynamic)
-
-
-# def dem_step_precision(state: DEMStateJAX, low_memory=False):
-#     """
-#     Does a precision update of DEM.
-#     """
-#     state.step_precision(low_memory=low_memory)
-
-
-# def dem_step_m(state: DEMStateJAX, lr_lambda, iter_lambda, min_improv):
-#     """
-#     Performs the noise hyperparameter update (step M) of DEM.
-#     """
-#     state.step_m(lr_lambda=lr_lambda, iter_lambda=iter_lambda, min_improv=min_improv)
-
-
-# def dem_step_e(state: DEMStateJAX, lr_theta, low_memory=True):
-#     """
-#     Performs the parameter update (step E) of DEM.
-#     """
-#     state.step_e(lr_theta=lr_theta, low_memory=low_memory)
-
-
-# def dem_step(
-#     state: DEMStateJAX,
-#     lr_dynamic,
-#     lr_theta,
-#     lr_lambda,
-#     iter_lambda=8,
-#     m_min_improv=0.01,
-# ):
-#     """
-#     Does an iteration of DEM.
-#     """
-#     state(
-#         lr_dynamic=lr_dynamic,
-#         lr_theta=lr_theta,
-#         lr_lambda=lr_lambda,
-#         iter_lambda=iter_lambda,
-#         m_min_improv=m_min_improv,
-#     )
+        Args:
+            lr_dynamic (float): learning rate
+            lr_theta (float): learning rate
+            lr_lambda (float): learning rate
+            iter_lambda (int): maximum number of iterations
+            iter_dem (int): how many steps to run DEM for
+            m_min_improv (float): minimum improvement before assuming convergence
+            low_memory (bool): Whether to use a low-memory but slow method for
+                computing hessians.
+        """
+        (
+            state.mu_x_tildes,
+            state.mu_v_tildes,
+            state.sig_x_tildes,
+            state.sig_v_tildes,
+            state.mu_theta,
+            state.mu_lambda,
+            state.sig_theta,
+            state.sig_lambda,
+        ) = _update_all_loop(
+            m_x=state.input.m_x,
+            m_v=state.input.m_v,
+            p=state.input.p,
+            d=state.input.d,
+            mu_x_tildes=state.mu_x_tildes,
+            mu_v_tildes=state.mu_v_tildes,
+            sig_x_tildes=state.sig_x_tildes,
+            sig_v_tildes=state.sig_v_tildes,
+            y_tildes=state.input.y_tildes,
+            eta_v_tildes=state.input.eta_v_tildes,
+            p_v_tildes=state.input.p_v_tildes,
+            eta_theta=state.input.eta_theta,
+            eta_lambda=state.input.eta_lambda,
+            p_theta=state.input.p_theta,
+            p_lambda=state.input.p_lambda,
+            mu_theta=state.mu_theta,
+            mu_lambda=state.mu_lambda,
+            sig_theta=state.sig_theta,
+            sig_lambda=state.sig_lambda,
+            gen_func_g=state.input.gen_func_g,
+            gen_func_f=state.input.gen_func_f,
+            omega_w=state.input.omega_w,
+            omega_z=state.input.omega_z,
+            noise_autocorr_inv=state.input.noise_autocorr_inv,
+            dt=state.input.dt,
+            lr_dynamic=lr_dynamic,
+            lr_theta=lr_theta,
+            lr_lambda=lr_lambda,
+            m_min_improv=m_min_improv,
+            low_memory_d=low_memory_d,
+            low_memory_e=low_memory_e,
+            low_memory_m=low_memory_m,
+            low_memory_precision=low_memory_precision,
+            iter_dem=iter_dem,
+            iter_lambda=iter_lambda,
+        )
 
 
 ##
