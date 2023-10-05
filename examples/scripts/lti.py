@@ -1,20 +1,27 @@
+"""
+This script runs a benchmark on the LTI example from [1]. It should more or
+less exactly reproduce the same results as in the paper, up to the random noise
+generated differently. Note that it takes a lot of memory, around 20 GB of RAM.
 
-from time import time
-
-import jax.numpy as jnp
-from jax import config
-
-config.update("jax_enable_x64", True)
-config.update("jax_debug_nans", True)
+[1] A. Anil Meera and M. Wisse, “Dynamic Expectation Maximization Algorithm for
+    Estimation of Linear Systems with Colored Noise,” Entropy (Basel), vol. 23,
+    no. 10, p. 1306, Oct. 2021, doi: 10.3390/e23101306.
+"""
 
 import pickle
 from pathlib import Path
+from time import time
 
+import jax.numpy as jnp
 import numpy as np
 from dem.algo import DEMInput, DEMState, extract_dynamic
 from dem.dummy import simulate_colored_lti
+from jax import config
 from tabulate import tabulate
 from tqdm import tqdm
+
+config.update("jax_enable_x64", True)
+config.update("jax_debug_nans", True)
 
 ##########
 ########## Test setup
@@ -121,8 +128,6 @@ p_lambda = np.eye(2) * np.exp(3)
 omega_w = np.eye(m_x)
 omega_z = np.eye(m_y)
 
-### Priors depending on the other priors
-
 dem_input = DEMInput(
     dt=dt,
     m_x=m_x,
@@ -145,17 +150,12 @@ dem_input = DEMInput(
 dem_state = DEMState.from_input(dem_input, x0)
 
 
-# Now do more DEM steps
 lr_dynamic = 1
 lr_theta = 10  # from the matlab code
 lr_lambda = 1
 iter_lambda = 8  # from the matlab code
 m_min_improv = 0.01
-num_iter = 50
-
-# Do one step to precompile everything
-# dem_state.run(lr_dynamic=lr_dynamic, lr_theta=lr_theta, lr_lambda=lr_lambda,
-#               iter_lambda=iter_lambda, m_min_improv=m_min_improv, iter_dem=1)
+num_iter = 25
 
 print("Running initial D step")
 t0 = time()
@@ -169,6 +169,7 @@ f_bar_diagnostics = []
 
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
 
 def print_convergence_table(A, B, C, mu_thetas, f_bars):
     rows = []
