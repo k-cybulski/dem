@@ -1,10 +1,11 @@
 from functools import partial
 
 import jax.numpy as jnp
+from math import ceil
 
 # DEM experiments often involve extremely high priors, which do not work well
 # with single precision float32
-from jax import jit
+from jax import jacrev, jit, jvp, vjp, vmap
 
 
 @jit
@@ -50,3 +51,28 @@ def deriv_mat(p, n):
         n: number of terms
     """
     return jnp.kron(jnp.eye(p + 1, k=1), jnp.eye(n))
+
+
+# shouldn't be JIT-compiled unfortunately due to the for loop
+# the batching mechanism can't be nicely implemented in a JIT-compilable manner
+# see commit 34e4ce767a7dce168e1dcf87d01577f31bc24354 for some alternative
+# implementations
+def jacfwd_low_memory(f, batch_size):
+    def jacfun(x):
+        def _jvp(s):
+            return jvp(f, (x,), (s,))[1]
+
+        basis = jnp.eye(x.size, dtype=x.dtype)
+        Jtr = []
+        for i in range(ceil(x.size / batch_size)):
+            batch = basis[(i * batch_size) : ((i + 1) * batch_size)]
+            Jtb = vmap(_jvp)(batch)
+            Jtr.append(Jtb)
+        Jt = jnp.concatenate(Jtr)
+        return jnp.transpose(Jt)
+
+    return jacfun
+
+
+def hessian_low_memory(f, batch_size):
+    return jacfwd_low_memory(jacrev(f), batch_size=batch_size)

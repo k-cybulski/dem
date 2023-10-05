@@ -13,10 +13,12 @@ from pathlib import Path
 from time import time
 
 import jax.numpy as jnp
+import matplotlib as mpl
 import numpy as np
 from dem.algo import DEMInput, DEMState, extract_dynamic
 from dem.dummy import simulate_colored_lti
 from jax import config
+from matplotlib import pyplot as plt
 from tabulate import tabulate
 from tqdm import tqdm
 
@@ -223,7 +225,7 @@ for i in tqdm(range(num_iter), desc="Running DEM..."):
     times["M"].append(time() - t0)
     print("Step E")
     t0 = time()
-    dem_state.step_e(lr_theta)
+    dem_state.step_e(lr_theta, low_memory=True)
     times["E"].append(time() - t0)
     print("Step precision")
     t0 = time()
@@ -246,7 +248,7 @@ for i in tqdm(range(num_iter), desc="Running DEM..."):
         "times": times,
     }
 
-    with open(OUTPUT_DIR / "lti_state.pkl", "wb") as file_:
+    with open(OUTPUT_DIR / "experiment_state.pkl", "wb") as file_:
         pickle.dump(demo_state, file_)
 
     pdict = {
@@ -263,3 +265,32 @@ for i in tqdm(range(num_iter), desc="Running DEM..."):
     )
     print_convergence_table(A, B, C, param_estimates, f_bars)
     print(tabulate(times, headers="keys", floatfmt=".3f"))
+
+##
+## Analysis and plots
+##
+
+# in case this is opened in the REPL without having executed the experiment itself above
+with open(OUTPUT_DIR / "experiment_state.pkl", "rb") as file_:
+    demo_state = pickle.load(file_)
+
+param_estimates = demo_state["param_estimates"]
+param_estimates_by_param = jnp.array(param_estimates).T
+
+fig, ax = plt.subplots()
+for est_seq, target in zip(
+    param_estimates_by_param[: (m_x * m_x + m_x * m_v), :],
+    true_params[: (m_x * m_x + m_x * m_v)],
+):
+    line = ax.plot(est_seq)[0]
+    ax.hlines(target, 0, len(est_seq), color=line.get_color(), linestyle="--")
+fig.suptitle("Parameter value estimates over course of DEM")
+ax.set_xlabel("DEM iteration")
+line_true = mpl.lines.Line2D(
+    [], [], color="grey", marker="", markersize=15, label="True value", linestyle="--"
+)
+line_estimate = mpl.lines.Line2D(
+    [], [], color="grey", marker="", markersize=15, label="Estimate", linestyle="-"
+)
+ax.legend(handles=[line_true, line_estimate])
+fig.savefig(OUTPUT_DIR / "params_over_time.pdf")

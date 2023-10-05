@@ -16,7 +16,7 @@ from jax.lax import fori_loop, while_loop
 
 from ...core import iterate_generalized
 from ...noise import autocorr_friston, noise_cov_gen_theoretical
-from .util import _fix_grad_shape, deriv_mat, logdet
+from .util import _fix_grad_shape, deriv_mat, hessian_low_memory, logdet
 
 # DEM experiments often involve extremely high priors, which do not work well
 # with single precision float32
@@ -531,7 +531,9 @@ def _verify_attr_dtypes(parent, attributes, dtype):
 # expected to be called in context of a DEMStateJAX object, since otherwise
 # they're somewhat unergonomic.
 #
-# By being implemented as pure functions, they can be JIT-compiled by JAX.
+# By being implemented as pure functions, they can be JIT-compiled by JAX. The
+# `_njit` functions are there as a non-JIT compiled alternative, which is
+# sometimes useful to limit memory usage at a cost of slower performance.
 #
 # [1] A. Anil Meera and M. Wisse, “Dynamic Expectation Maximization Algorithm
 #   for Estimation of Linear Systems with Colored Noise,” Entropy (Basel), vol.
@@ -765,19 +767,7 @@ def _update_precision(
     return sig_theta, sig_lambda, sig_dyn_tildes
 
 
-@partial(
-    jit,
-    static_argnames=(
-        "m_x",
-        "m_v",
-        "p",
-        "d",
-        "gen_func_f",
-        "gen_func_g",
-        "iter_lambda",
-    ),
-)
-def _update_lambda(
+def _update_lambda_njit(
     m_x,
     m_v,
     p,
@@ -803,6 +793,7 @@ def _update_lambda(
     lr_lambda,
     iter_lambda,
     min_improv,
+    hessian_func=hessian,
 ):
     def lambda_free_action(mu_lambda):
         # free action as a function of lambda
@@ -854,11 +845,22 @@ def _update_lambda(
     return mu_lambda
 
 
-@partial(
-    jit,
-    static_argnames=("m_x", "m_v", "p", "d", "gen_func_f", "gen_func_g"),
+_update_lambda = jit(
+    _update_lambda_njit,
+    static_argnames=(
+        "m_x",
+        "m_v",
+        "p",
+        "d",
+        "gen_func_f",
+        "gen_func_g",
+        "iter_lambda",
+        "hessian_func",
+    ),
 )
-def _update_theta(
+
+
+def _update_theta_njit(
     m_x,
     m_v,
     p,
@@ -882,6 +884,7 @@ def _update_theta(
     omega_z,
     noise_autocorr_inv,
     lr_theta,
+    hessian_func=hessian,
 ):
     def theta_free_action(mu_theta):
         return free_action(
@@ -914,12 +917,26 @@ def _update_theta(
     theta_d = lr_theta * theta_d_raw
     # using standard jax.hessian causes an out-of-memory in even relatively
     # easy cases (tested on a 20 gb ram machine)
-    theta_dd = lr_theta * hessian(theta_free_action)(mu_theta)
+    theta_dd = lr_theta * hessian_func(theta_free_action)(mu_theta)
     step_matrix = (
         jsp.linalg.expm(theta_dd, max_squarings=MATRIX_EXPM_MAX_SQUARINGS)
         - jnp.eye(theta_dd.shape[0], dtype=mu_theta.dtype)
     ) @ jnp.linalg.inv(theta_dd)
     return mu_theta + step_matrix @ theta_d
+
+
+_update_theta = jit(
+    _update_theta_njit,
+    static_argnames=(
+        "m_x",
+        "m_v",
+        "p",
+        "d",
+        "gen_func_f",
+        "gen_func_g",
+        "hessian_func",
+    ),
+)
 
 
 @partial(
@@ -1597,14 +1614,26 @@ class DEMStateJAX:
             lr_dynamic=lr_dynamic,
         )
 
-    def step_e(state, lr_theta):
+    def step_e(state, lr_theta, low_memory=False):
         """
         Performs the E step of DEM, updating parameter estimates (mu_theta).
 
         Args:
             lr_theta (float): learning rate
+            low_memory (bool or int): whether to use a low-memory but slower
+                method to compute hessians. If an int, then it sets a batch
+                size parameter defining how many columns of the hessian to
+                compute at once (higher -> faster but more memory). If True,
+                then a batch size of 1 is chosen.
         """
-        state.mu_theta = _update_theta(
+        update_theta_func = _update_theta if not low_memory else _update_theta_njit
+        batch_size = None if not low_memory else int(low_memory)
+        hessian_func = (
+            hessian
+            if not low_memory
+            else partial(hessian_low_memory, batch_size=batch_size)
+        )
+        state.mu_theta = update_theta_func(
             m_x=state.input.m_x,
             m_v=state.input.m_v,
             p=state.input.p,
@@ -1628,10 +1657,11 @@ class DEMStateJAX:
             omega_z=state.input.omega_z,
             noise_autocorr_inv=state.input.noise_autocorr_inv,
             lr_theta=lr_theta,
+            hessian_func=hessian_func,
         )
         # TODO: should be an if statement comparing new f_bar with old
 
-    def step_m(state, lr_lambda, iter_lambda=8, min_improv=0.01):
+    def step_m(state, lr_lambda, iter_lambda=8, min_improv=0.01, low_memory=False):
         """
         Performs the M step of DEM, updating hyperparameter estimates
         (mu_lambda).
@@ -1640,8 +1670,20 @@ class DEMStateJAX:
             lr_lambda (float): learning rate
             iter_lambda (int): maximum number of iterations
             min_improv (float): minimum improvement before assuming convergence
+            low_memory (bool or int): whether to use a low-memory but slower
+                method to compute hessians. If an int, then it sets a batch
+                size parameter defining how many columns of the hessian to
+                compute at once (higher -> faster but more memory). If True,
+                then a batch size of 1 is chosen.
         """
-        state.mu_lambda = _update_lambda(
+        update_lambda_func = _update_lambda if not low_memory else _update_lambda_njit
+        batch_size = None if not low_memory else int(low_memory)
+        hessian_func = (
+            hessian
+            if not low_memory
+            else partial(hessian_low_memory, batch_size=batch_size)
+        )
+        state.mu_lambda = update_lambda_func(
             m_x=state.input.m_x,
             m_v=state.input.m_v,
             p=state.input.p,
@@ -1667,6 +1709,7 @@ class DEMStateJAX:
             lr_lambda=lr_lambda,
             iter_lambda=iter_lambda,
             min_improv=min_improv,
+            hessian_func=hessian_func,
         )
 
     def step_precision(state):
