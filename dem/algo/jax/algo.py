@@ -122,11 +122,58 @@ def internal_energy_static(
     return u_c, u_c_theta_dd, u_c_lambda_dd
 
 
+@partial(
+    jit,
+    static_argnames=(
+        "m_x",
+        "p",
+        "cov"
+    ),
+)
+def _dyn_to_xv_tilde(dyn_tilde, m_x, p, cov=False):
+    """Extracts generalized states x_tilde and causes v_tilde from the combined
+    vector dyn_tilde, corresponding to vector X of [1]. Works both on a single
+    vector as well as on a sequence of vectors.
+
+    [1] A. Anil Meera and M. Wisse, “Dynamic Expectation Maximization Algorithm
+        for Estimation of Linear Systems with Colored Noise,” Entropy (Basel),
+        vol. 23, no. 10, p. 1306, Oct. 2021, doi: 10.3390/e23101306.
+    """
+    if cov: # for covariance matrices
+        x_tildes = dyn_tilde[..., : (m_x * (p + 1)), : (m_x * (p + 1))]
+        v_tildes = dyn_tilde[..., (m_x * (p + 1)) :, (m_x * (p + 1)) :]
+    else: # for column vectors
+        x_tildes = dyn_tilde[..., : (m_x * (p + 1)), :]
+        v_tildes = dyn_tilde[..., (m_x * (p + 1)) :, :]
+    return x_tildes, v_tildes
+
+
+@partial(
+    jit,
+    static_argnames=(
+        "m_x",
+        "p",
+    ),
+)
+def _dyn_from_xv_tilde(x_tilde, v_tilde):
+    """Combines generalized states x_tilde and causes v_tilde to form
+    dyn_tilde, corresponding to vector X of [1]. Works both on a single
+    vector as well as on a sequence of vectors.
+
+    [1] A. Anil Meera and M. Wisse, “Dynamic Expectation Maximization Algorithm
+        for Estimation of Linear Systems with Colored Noise,” Entropy (Basel),
+        vol. 23, no. 10, p. 1306, Oct. 2021, doi: 10.3390/e23101306.
+    """
+    ndim = x_tilde.ndim  # assuming v_tilde has the same
+    axis = ndim - 2  # to ensure we support both single vectors and batches
+    dyn_tilde = jnp.concatenate([x_tilde, v_tilde], axis=axis)
+    return dyn_tilde
+
+
 def internal_energy_dynamic(
     gen_func_f,
     gen_func_g,
-    mu_x_tildes,
-    mu_v_tildes,
+    mu_dyn_tildes,
     y_tildes,
     m_x,
     m_v,
@@ -145,9 +192,9 @@ def internal_energy_dynamic(
     deriv_mat_x = deriv_mat(p, m_x)
 
     @partial(jit, static_argnames=("diagnostic",))
-    def _int_eng_dynamic(
-        mu_x_tildes, mu_v_tildes, mu_theta, mu_lambda, diagnostic=False
-    ):
+    def _int_eng_dynamic(mu_dyn_tildes, mu_theta, mu_lambda, diagnostic=False):
+        mu_x_tildes, mu_v_tildes = _dyn_to_xv_tilde(mu_dyn_tildes, m_x, p)
+        # FIXME: dyn_tildes to x_tildes v_tildes
         # Need to pad v_tilde with zeros to account for difference between
         # state embedding order `p` and causes embedding order `d`.
         mu_v_tildes_pad = jnp.pad(mu_v_tildes, ((0, 0), (0, p - d), (0, 0)))
@@ -197,9 +244,7 @@ def internal_energy_dynamic(
         else:
             return u_t
 
-    out = _int_eng_dynamic(
-        mu_x_tildes, mu_v_tildes, mu_theta, mu_lambda, diagnostic=diagnostic
-    )
+    out = _int_eng_dynamic(mu_dyn_tildes, mu_theta, mu_lambda, diagnostic=diagnostic)
     if diagnostic:
         u_t, extr = out
     else:
@@ -215,36 +260,26 @@ def internal_energy_dynamic(
     # FIXME: make it possible to use hessian_low_memory_jit below instead of jax.hessian
     # need to improve hessian_low_memory_jit to support the shapes of
     # mu_x_tildes and mu_v_tildes
-    u_t_x_tilde_dd = hessian(
-        lambda mu_x_tildes: jnp.sum(
-            _int_eng_dynamic(mu_x_tildes, mu_v_tildes, mu_theta, mu_lambda)
+    u_t_dyn_tilde_dd = hessian(
+        lambda mu_dyn_tildes: jnp.sum(
+            _int_eng_dynamic(mu_dyn_tildes, mu_theta, mu_lambda)
         )
-    )(mu_x_tildes)
-    u_t_v_tilde_dd = hessian(
-        lambda mu_v_tildes: jnp.sum(
-            _int_eng_dynamic(mu_x_tildes, mu_v_tildes, mu_theta, mu_lambda)
-        )
-    )(mu_v_tildes)
+    )(mu_dyn_tildes)
     u_t_theta_dd = hessian_func(
-        lambda mu_theta: jnp.sum(
-            _int_eng_dynamic(mu_x_tildes, mu_v_tildes, mu_theta, mu_lambda)
-        )
+        lambda mu_theta: jnp.sum(_int_eng_dynamic(mu_dyn_tildes, mu_theta, mu_lambda))
     )(mu_theta)
     u_t_lambda_dd = hessian_func(
-        lambda mu_lambda: jnp.sum(
-            _int_eng_dynamic(mu_x_tildes, mu_v_tildes, mu_theta, mu_lambda)
-        )
+        lambda mu_lambda: jnp.sum(_int_eng_dynamic(mu_dyn_tildes, mu_theta, mu_lambda))
     )(mu_lambda)
 
-    u_t_x_tilde_dd = _fix_grad_shape(u_t_x_tilde_dd)
-    u_t_v_tilde_dd = _fix_grad_shape(u_t_v_tilde_dd)
+    u_t_dyn_tilde_dd = _fix_grad_shape(u_t_dyn_tilde_dd)
     u_t_theta_dd = _fix_grad_shape(u_t_theta_dd)
     u_t_lambda_dd = _fix_grad_shape(u_t_lambda_dd)
 
     if diagnostic:
-        return u_t, u_t_x_tilde_dd, u_t_v_tilde_dd, u_t_theta_dd, u_t_lambda_dd, extr
+        return u_t, u_t_dyn_tilde_dd, u_t_theta_dd, u_t_lambda_dd, extr
     else:
-        return u_t, u_t_x_tilde_dd, u_t_v_tilde_dd, u_t_theta_dd, u_t_lambda_dd
+        return u_t, u_t_dyn_tilde_dd, u_t_theta_dd, u_t_lambda_dd
 
 
 def internal_action(
@@ -262,10 +297,8 @@ def internal_action(
     m_v,
     p,
     d,
-    mu_x_tildes,
-    mu_v_tildes,
-    sig_x_tildes,
-    sig_v_tildes,
+    mu_dyn_tildes,
+    sig_dyn_tildes,
     y_tildes,
     eta_v_tildes,
     p_v_tildes,
@@ -289,15 +322,13 @@ def internal_action(
     )
     (
         u_t,
-        u_t_x_tilde_dds,
-        u_t_v_tilde_dds,
+        u_t_dyn_tilde_dds,
         u_t_theta_dd,
         u_t_lambda_dd,
     ) = internal_energy_dynamic(
         gen_func_f,
         gen_func_g,
-        mu_x_tildes,
-        mu_v_tildes,
+        mu_dyn_tildes,
         y_tildes,
         m_x,
         m_v,
@@ -313,7 +344,7 @@ def internal_action(
         low_memory=low_memory,
     )
     u += jnp.sum(u_t)
-    return u, u_theta_dd, u_lambda_dd, u_t_x_tilde_dds, u_t_v_tilde_dds
+    return u, u_theta_dd, u_lambda_dd, u_t_dyn_tilde_dds
 
 
 @jit
@@ -342,10 +373,8 @@ def free_action(
     m_v,
     p,
     d,
-    mu_x_tildes,
-    mu_v_tildes,
-    sig_x_tildes,
-    sig_v_tildes,
+    mu_dyn_tildes,
+    sig_dyn_tildes,
     y_tildes,
     eta_v_tildes,
     p_v_tildes,
@@ -377,16 +406,13 @@ def free_action(
         m_v (int): number of causes
         p (int): state embedding order, i.e. how many derivatives are tracked
         d (int): cause embedding order, i.e. how many derivatives are tracked
-        mu_x_tildes (n_tilde, m_x * (p + 1), 1): array of estimated posterior
-            means of states in generalized coordinates
-        mu_v_tildes (n_tilde, m_v * (d + 1), 1): array of estimated posterior
-            means of causes in generalized coordinates
-        sig_x_tildes (n_tilde, m_x * (d + 1), m_x * (d + 1)): array of
-            estimated posterior covariance matrices of states in generalized
-            coordinates
-        sig_v_tildes (n_tilde, m_x * (d + 1), m_x * (d + 1)): array of
-            estimated posterior covariance matrices of causes in generalized
-            coordinates
+        mu_dyn_tildes (n_tilde, m_x * (p + 1) + m_v * (d + 1), 1): array of
+            estimated posterior means of states and causes in generalized
+            coordinates. Corresponds to sequence of vectors X from [1], as
+            defined near eq. (47).
+        sig_dyn_tildes (n_tilde, m_x * (d + 1) + m_v * (d + 1), m_x * (d + 1) +
+            m_v * (d + 1)): array of estimated posterior covariance matrices of
+            states and causes in generalized coordinates
         y_tildes (n_tilde, m_y * (p + 1), 1): array of outputs in generalized
             coordinates
         eta_v_tildes (n_tilde, m_v * (d + 1), 1): array of prior means of
@@ -410,8 +436,8 @@ def free_action(
         gen_func_g: jit-compiled  output function in generalized coordinates,
             accepting argmuents (x_tilde, v_tilde). See DEMInputJAX code for
             example of how it's defined
-        omega_w (m_x, m_x): correlation matrix of state noises
-        omega_z (m_y, m_y): correlation matrix of output noises
+        omega_w (m_x, m_x): inverse correlation matrix of state noises
+        omega_z (m_y, m_y): inverse correlation matrix of output noises
         noise_autocorr_inv (p + 1, p + 1): precision of noises in generalized
             coordinates, like eq. (7) of [1].
         skip_constant (bool): whether to skip constant terms of free action.
@@ -458,8 +484,7 @@ def free_action(
     out = internal_energy_dynamic(
         gen_func_f,
         gen_func_g,
-        mu_x_tildes,
-        mu_v_tildes,
+        mu_dyn_tildes,
         y_tildes,
         m_x,
         m_v,
@@ -476,12 +501,11 @@ def free_action(
         low_memory=low_memory,
     )
     if diagnostic:
-        u_t, u_t_x_tilde_dd, u_t_v_tilde_dd, u_t_theta_dd, u_t_lambda_dd, extr_dt = out
+        u_t, u_t_dyn_tilde_dd, u_t_theta_dd, u_t_lambda_dd, extr_dt = out
         extr = {**extr, **extr_dt}
     else:
-        u_t, u_t_x_tilde_dd, u_t_v_tilde_dd, u_t_theta_dd, u_t_lambda_dd = out
-    w_x_tilde_sum_ = _batch_matmul_trace_sum(sig_x_tildes, u_t_x_tilde_dd)
-    w_v_tilde_sum_ = _batch_matmul_trace_sum(sig_v_tildes, u_t_v_tilde_dd)
+        u_t, u_t_dyn_tilde_dd, u_t_theta_dd, u_t_lambda_dd = out
+    w_dyn_tilde_sum_ = _batch_matmul_trace_sum(sig_dyn_tildes, u_t_dyn_tilde_dd)
     # w_theta and w_lambda are sums already, because u_t_theta_dd is a sum
     # because of how the batch Hessian is computed
     if not skip_constant:
@@ -491,25 +515,21 @@ def free_action(
         w_theta_sum_ = jnp.trace(sig_theta @ (u_t_theta_dd))
         w_lambda_sum_ = jnp.trace(sig_lambda @ (u_t_lambda_dd))
 
-    sig_logdet_t = (
-        jnp.sum(vmap(logdet)(sig_x_tildes)) + jnp.sum(vmap(logdet)(sig_v_tildes))
-    ) / 2
+    sig_logdet_t = (jnp.sum(vmap(logdet)(sig_dyn_tildes))) / 2
 
     f_tsum = (
         jnp.sum(u_t)
         + sig_logdet_t
-        + (w_x_tilde_sum_ + w_v_tilde_sum_ + w_theta_sum_ + w_lambda_sum_) / 2
+        + (w_dyn_tilde_sum_ + w_theta_sum_ + w_lambda_sum_) / 2
     )
 
     if diagnostic:
         extr_t = {
             "u_t": u_t,
-            "u_t_x_tilde_dd": u_t_x_tilde_dd,
-            "u_t_v_tilde_dd": u_t_v_tilde_dd,
+            "u_t_dyn_tilde_dd": u_t_dyn_tilde_dd,
             "u_t_theta_dd": u_t_theta_dd,
             "u_t_lambda_dd": u_t_lambda_dd,
-            "w_x_tilde_sum_": w_x_tilde_sum_,
-            "w_v_tilde_sum_": w_v_tilde_sum_,
+            "w_dyn_tilde_sum_": w_dyn_tilde_sum_,
             "w_theta_sum_": w_theta_sum_,
             "w_lambda_sum_": w_lambda_sum_,
             "sig_logdet_t": sig_logdet_t,
@@ -552,13 +572,11 @@ def _verify_attr_dtypes(parent, attributes, dtype):
 
 
 def _dynamic_free_energy(
-    # time-dependent state and input estimates
-    mu_x_tilde_t,
-    mu_v_tilde_t,
+    # time-dependent state and input estimates, combined into one vector
+    mu_dyn_tilde,
     # extra time-dependent variables
     y_tilde,
-    sig_x_tilde,
-    sig_v_tilde,
+    sig_dyn_tilde,
     eta_v_tilde,
     p_v_tilde,
     # all of the other argmuents to free_action
@@ -588,10 +606,8 @@ def _dynamic_free_energy(
         m_v=m_v,
         p=p,
         d=d,
-        mu_x_tildes=mu_x_tilde_t[None],
-        mu_v_tildes=mu_v_tilde_t[None],
-        sig_x_tildes=sig_x_tilde[None],
-        sig_v_tildes=sig_v_tilde[None],
+        mu_dyn_tildes=mu_dyn_tilde[None],
+        sig_dyn_tildes=sig_dyn_tilde[None],
         y_tildes=y_tilde[None],
         eta_v_tildes=eta_v_tilde[None],
         p_v_tildes=p_v_tilde[None],
@@ -622,10 +638,8 @@ def _update_xv(
     m_v,
     p,
     d,
-    mu_x_tildes,
-    mu_v_tildes,
-    sig_x_tildes,
-    sig_v_tildes,
+    mu_dyn_tildes,
+    sig_dyn_tildes,
     y_tildes,
     eta_v_tildes,
     p_v_tildes,
@@ -648,34 +662,32 @@ def _update_xv(
 ):
     dtype = y_tildes.dtype
     total_steps = len(y_tildes)
-    mu_x0_tilde = mu_x_tildes[0]
-    mu_v0_tilde = mu_v_tildes[0]
-    mu_x_tildes = jnp.concatenate(
-        [mu_x0_tilde[None], jnp.zeros((total_steps - 1, m_x * (p + 1), 1))], axis=0
-    )
-    mu_v_tildes = jnp.concatenate(
-        [mu_v0_tilde[None], jnp.zeros((total_steps - 1, m_v * (d + 1), 1))], axis=0
+    mu_dyn0_tilde = mu_dyn_tildes[0]
+    mu_dyn_tildes = jnp.concatenate(
+        [
+            mu_dyn0_tilde[None],
+            jnp.zeros((total_steps - 1, m_x * (p + 1) + m_v * (d + 1), 1)),
+        ],
+        axis=0,
     )
     deriv_mat_x = deriv_mat(p, m_x).astype(dtype)
     deriv_mat_v = deriv_mat(d, m_v).astype(dtype)
 
+    deriv_mat_dyn = jsp.linalg.block_diag(deriv_mat_x, deriv_mat_v)
+
     def d_step_iter(t, dynamic_state):
         y_tilde = y_tildes[t]
-        sig_x_tilde = sig_x_tildes[t]
-        sig_v_tilde = sig_v_tildes[t]
+        sig_dyn_tilde = sig_dyn_tildes[t]
         eta_v_tilde = eta_v_tildes[t]
         p_v_tilde = p_v_tildes[t]
-        mu_x_tildes, mu_v_tildes = dynamic_state
-        mu_x_tilde_t = mu_x_tildes[t]
-        mu_v_tilde_t = mu_v_tildes[t]
+        mu_dyn_tildes = dynamic_state
+        mu_dyn_tilde_t = mu_dyn_tildes[t]
 
         # free action on just a single timestep
-        x_d_raw, v_d_raw = grad(_dynamic_free_energy, argnums=(0, 1))(
-            mu_x_tilde_t,
-            mu_v_tilde_t,
+        dyn_d_raw = grad(_dynamic_free_energy, argnums=0)(
+            mu_dyn_tilde_t,
             y_tilde,
-            sig_x_tilde,
-            sig_v_tilde,
+            sig_dyn_tilde,
             eta_v_tilde,
             p_v_tilde,
             m_x=m_x,
@@ -698,14 +710,11 @@ def _update_xv(
             low_memory=low_memory,
         )
         # NOTE: In the original pseudocode, x and v are in one vector
-        x_d = deriv_mat_x @ mu_x_tilde_t + lr_dynamic * x_d_raw
-        v_d = deriv_mat_v @ mu_v_tilde_t + lr_dynamic * v_d_raw
-        x_dd = lr_dynamic * hessian(_dynamic_free_energy, argnums=0)(
-            mu_x_tilde_t,
-            mu_v_tilde_t,
+        dyn_d = deriv_mat_dyn @ mu_dyn_tilde_t + lr_dynamic * dyn_d_raw
+        dyn_dd = lr_dynamic * hessian(_dynamic_free_energy, argnums=0)(
+            mu_dyn_tilde_t,
             y_tilde,
-            sig_x_tilde,
-            sig_v_tilde,
+            sig_dyn_tilde,
             eta_v_tilde,
             p_v_tilde,
             m_x=m_x,
@@ -727,51 +736,17 @@ def _update_xv(
             noise_autocorr_inv=noise_autocorr_inv,
             low_memory=low_memory,
         )
-        v_dd = lr_dynamic * hessian(_dynamic_free_energy, argnums=1)(
-            mu_x_tilde_t,
-            mu_v_tilde_t,
-            y_tilde,
-            sig_x_tilde,
-            sig_v_tilde,
-            eta_v_tilde,
-            p_v_tilde,
-            m_x=m_x,
-            m_v=m_v,
-            p=p,
-            d=d,
-            eta_theta=eta_theta,
-            eta_lambda=eta_lambda,
-            p_theta=p_theta,
-            p_lambda=p_lambda,
-            mu_theta=mu_theta,
-            mu_lambda=mu_lambda,
-            sig_theta=sig_theta,
-            sig_lambda=sig_lambda,
-            gen_func_g=gen_func_g,
-            gen_func_f=gen_func_f,
-            omega_w=omega_w,
-            omega_z=omega_z,
-            noise_autocorr_inv=noise_autocorr_inv,
-            low_memory=low_memory,
-        )
-        x_dd = deriv_mat_x + _fix_grad_shape(x_dd)
-        v_dd = deriv_mat_v + _fix_grad_shape(v_dd)
-        step_matrix_x = (
-            jsp.linalg.expm(x_dd * dt, max_squarings=MATRIX_EXPM_MAX_SQUARINGS)
-            - jnp.eye(x_dd.shape[0], dtype=dtype)
-        ) @ jnp.linalg.inv(x_dd)
-        step_matrix_v = (
-            jsp.linalg.expm(v_dd * dt, max_squarings=MATRIX_EXPM_MAX_SQUARINGS)
-            - jnp.eye(v_dd.shape[0], dtype=dtype)
-        ) @ jnp.linalg.inv(v_dd)
-        mu_x_tilde_tp1 = mu_x_tilde_t + step_matrix_x @ x_d
-        mu_v_tilde_tp1 = mu_v_tilde_t + step_matrix_v @ v_d
+        dyn_dd = deriv_mat_dyn + _fix_grad_shape(dyn_dd)
+        step_matrix = (
+            jsp.linalg.expm(dyn_dd * dt, max_squarings=MATRIX_EXPM_MAX_SQUARINGS)
+            - jnp.eye(dyn_dd.shape[0], dtype=dtype)
+        ) @ jnp.linalg.inv(dyn_dd)
+        mu_dyn_tilde_tp1 = mu_dyn_tilde_t + step_matrix @ dyn_d
 
-        mu_x_tildes = mu_x_tildes.at[t + 1].set(mu_x_tilde_tp1)
-        mu_v_tildes = mu_v_tildes.at[t + 1].set(mu_v_tilde_tp1)
-        return (mu_x_tildes, mu_v_tildes)
+        mu_dyn_tildes = mu_dyn_tildes.at[t + 1].set(mu_dyn_tilde_tp1)
+        return mu_dyn_tildes
 
-    return fori_loop(0, len(y_tildes) - 1, d_step_iter, (mu_x_tildes, mu_v_tildes))
+    return fori_loop(0, len(y_tildes) - 1, d_step_iter, mu_dyn_tildes)
 
 
 @partial(
@@ -791,10 +766,8 @@ def _update_precision(
     m_v,
     p,
     d,
-    mu_x_tildes,
-    mu_v_tildes,
-    sig_x_tildes,
-    sig_v_tildes,
+    mu_dyn_tildes,
+    sig_dyn_tildes,
     y_tildes,
     eta_v_tildes,
     p_v_tildes,
@@ -803,7 +776,7 @@ def _update_precision(
     noise_autocorr_inv,
     low_memory,
 ):
-    u, u_theta_dd, u_lambda_dd, u_t_x_tilde_dds, u_t_v_tilde_dds = internal_action(
+    u, u_theta_dd, u_lambda_dd, u_t_dyn_tilde_dds = internal_action(
         mu_theta=mu_theta,
         mu_lambda=mu_lambda,
         eta_theta=eta_theta,
@@ -816,10 +789,8 @@ def _update_precision(
         m_v=m_v,
         p=p,
         d=d,
-        mu_x_tildes=mu_x_tildes,
-        mu_v_tildes=mu_v_tildes,
-        sig_x_tildes=sig_x_tildes,
-        sig_v_tildes=sig_v_tildes,
+        mu_dyn_tildes=mu_dyn_tildes,
+        sig_dyn_tildes=sig_dyn_tildes,
         y_tildes=y_tildes,
         eta_v_tildes=eta_v_tildes,
         p_v_tildes=p_v_tildes,
@@ -830,9 +801,8 @@ def _update_precision(
     )
     sig_theta = jnp.linalg.inv(-u_theta_dd)
     sig_lambda = jnp.linalg.inv(-u_lambda_dd)
-    sig_x_tildes = -jnp.linalg.inv(u_t_x_tilde_dds)
-    sig_v_tildes = -jnp.linalg.inv(u_t_v_tilde_dds)
-    return sig_theta, sig_lambda, sig_x_tildes, sig_v_tildes
+    sig_dyn_tildes = -jnp.linalg.inv(u_t_dyn_tilde_dds)
+    return sig_theta, sig_lambda, sig_dyn_tildes
 
 
 @partial(
@@ -853,10 +823,8 @@ def _update_lambda(
     m_v,
     p,
     d,
-    mu_x_tildes,
-    mu_v_tildes,
-    sig_x_tildes,
-    sig_v_tildes,
+    mu_dyn_tildes,
+    sig_dyn_tildes,
     y_tildes,
     eta_v_tildes,
     p_v_tildes,
@@ -885,10 +853,8 @@ def _update_lambda(
             m_v=m_v,
             p=p,
             d=d,
-            mu_x_tildes=mu_x_tildes,
-            mu_v_tildes=mu_v_tildes,
-            sig_x_tildes=sig_x_tildes,
-            sig_v_tildes=sig_v_tildes,
+            mu_dyn_tildes=mu_dyn_tildes,
+            sig_dyn_tildes=sig_dyn_tildes,
             y_tildes=y_tildes,
             eta_v_tildes=eta_v_tildes,
             p_v_tildes=p_v_tildes,
@@ -940,10 +906,8 @@ def _update_theta(
     m_v,
     p,
     d,
-    mu_x_tildes,
-    mu_v_tildes,
-    sig_x_tildes,
-    sig_v_tildes,
+    mu_dyn_tildes,
+    sig_dyn_tildes,
     y_tildes,
     eta_v_tildes,
     p_v_tildes,
@@ -969,10 +933,8 @@ def _update_theta(
             m_v=m_v,
             p=p,
             d=d,
-            mu_x_tildes=mu_x_tildes,
-            mu_v_tildes=mu_v_tildes,
-            sig_x_tildes=sig_x_tildes,
-            sig_v_tildes=sig_v_tildes,
+            mu_dyn_tildes=mu_dyn_tildes,
+            sig_dyn_tildes=sig_dyn_tildes,
             y_tildes=y_tildes,
             eta_v_tildes=eta_v_tildes,
             p_v_tildes=p_v_tildes,
@@ -1030,10 +992,8 @@ def _update_all(
     m_v,
     p,
     d,
-    mu_x_tildes,
-    mu_v_tildes,
-    sig_x_tildes,
-    sig_v_tildes,
+    mu_dyn_tildes,
+    sig_dyn_tildes,
     y_tildes,
     eta_v_tildes,
     p_v_tildes,
@@ -1068,10 +1028,8 @@ def _update_all(
         m_v,
         p,
         d,
-        mu_x_tildes,
-        mu_v_tildes,
-        sig_x_tildes,
-        sig_v_tildes,
+        mu_dyn_tildes,
+        sig_dyn_tildes,
         y_tildes,
         eta_v_tildes,
         p_v_tildes,
@@ -1098,10 +1056,8 @@ def _update_all(
         m_v,
         p,
         d,
-        mu_x_tildes,
-        mu_v_tildes,
-        sig_x_tildes,
-        sig_v_tildes,
+        mu_dyn_tildes,
+        sig_dyn_tildes,
         y_tildes,
         eta_v_tildes,
         p_v_tildes,
@@ -1129,10 +1085,8 @@ def _update_all(
         m_v,
         p,
         d,
-        mu_x_tildes,
-        mu_v_tildes,
-        sig_x_tildes,
-        sig_v_tildes,
+        mu_dyn_tildes,
+        sig_dyn_tildes,
         y_tildes,
         eta_v_tildes,
         p_v_tildes,
@@ -1154,7 +1108,7 @@ def _update_all(
     )
 
     # Precision update step
-    sig_theta, sig_lambda, sig_x_tildes, sig_v_tildes = _update_precision(
+    sig_theta, sig_lambda, sig_dyn_tildes = _update_precision(
         mu_theta,
         mu_lambda,
         eta_theta,
@@ -1167,10 +1121,8 @@ def _update_all(
         m_v,
         p,
         d,
-        mu_x_tildes,
-        mu_v_tildes,
-        sig_x_tildes,
-        sig_v_tildes,
+        mu_dyn_tildes,
+        sig_dyn_tildes,
         y_tildes,
         eta_v_tildes,
         p_v_tildes,
@@ -1181,10 +1133,8 @@ def _update_all(
     )
 
     return (
-        mu_x_tildes,
-        mu_v_tildes,
-        sig_x_tildes,
-        sig_v_tildes,
+        mu_dyn_tildes,
+        sig_dyn_tildes,
         mu_theta,
         mu_lambda,
         sig_theta,
@@ -1211,10 +1161,8 @@ def _update_all_loop(
     m_v,
     p,
     d,
-    mu_x_tildes,
-    mu_v_tildes,
-    sig_x_tildes,
-    sig_v_tildes,
+    mu_dyn_tildes,
+    sig_dyn_tildes,
     y_tildes,
     eta_v_tildes,
     p_v_tildes,
@@ -1244,10 +1192,8 @@ def _update_all_loop(
     iter_dem,
 ):
     init_val = (
-        mu_x_tildes,
-        mu_v_tildes,
-        sig_x_tildes,
-        sig_v_tildes,
+        mu_dyn_tildes,
+        sig_dyn_tildes,
         mu_theta,
         mu_lambda,
         sig_theta,
@@ -1256,10 +1202,8 @@ def _update_all_loop(
 
     def _state_update(t, val):
         (
-            mu_x_tildes,
-            mu_v_tildes,
-            sig_x_tildes,
-            sig_v_tildes,
+            mu_dyn_tildes,
+            sig_dyn_tildes,
             mu_theta,
             mu_lambda,
             sig_theta,
@@ -1270,10 +1214,8 @@ def _update_all_loop(
             m_v,
             p,
             d,
-            mu_x_tildes,
-            mu_v_tildes,
-            sig_x_tildes,
-            sig_v_tildes,
+            mu_dyn_tildes,
+            sig_dyn_tildes,
             y_tildes,
             eta_v_tildes,
             p_v_tildes,
@@ -1347,8 +1289,8 @@ class DEMInputJAX:
         p_v_tildes (n_tilde, m_v * (d + 1), m_v * (d + 1)): array of prior
             precisions of causes in generalized coordinates. Computed from p_v
         dtype (np.dtype): dtype of data. Computed from ys
-        omega_w (m_x, m_x): correlation matrix of state noises
-        omega_z (m_y, m_y): correlation matrix of output noises
+        omega_w (m_x, m_x): inverse correlation matrix of state noises
+        omega_z (m_y, m_y): inverse correlation matrix of output noises
         noise_autocorr_inv (p + 1, p + 1): precision of noises in generalized
             coordinates, like eq. (7) of [1]. Computed based on
             noise_temporal_sig
@@ -1530,32 +1472,32 @@ class DEMStateJAX:
 
     Args:
         input (DEMInputJAX): underlying input containing data and priors
-        mu_x_tildes (n_tilde, m_x * (p + 1), 1): array of estimated posterior
-            means of states in generalized coordinates
-        mu_v_tildes (n_tilde, m_v * (d + 1), 1): array of estimated posterior
-            means of causes in generalized coordinates
-        sig_x_tildes (n_tilde, m_x * (d + 1), m_x * (d + 1)): array of
-            estimated posterior covariance matrices of states in generalized
-            coordinates
-        sig_v_tildes (n_tilde, m_x * (d + 1), m_x * (d + 1)): array of
-            estimated posterior covariance matrices of causes in generalized
-            coordinates
+        mu_dyn_tildes (n_tilde, m_x * (p + 1) + m_v * (d + 1), 1): array of
+            estimated posterior means of states and causes in generalized
+            coordinates. Corresponds to sequence of vectors X from [1], as
+            defined near eq. (47).
+        sig_dyn_tildes (n_tilde, m_x * (d + 1) + m_v * (d + 1), m_x * (d + 1) +
+            m_v * (d + 1)): array of estimated posterior covariance matrices of
+            states and causes in generalized coordinates
         mu_theta (m_theta,): array of estimated posterior means of parameters
         mu_lambda (2,): array of estimated posterior means of hyperparameters
         sig_theta (m_theta, m_theta): array of estimated posterior covariances
             of parameters
         sig_lambda (2, 2): array of estimated posterior covariances of
             hyperparameters
+
+
+    [1] A. Anil Meera and M. Wisse, “Dynamic Expectation Maximization Algorithm
+        for Estimation of Linear Systems with Colored Noise,” Entropy
+        (Basel), vol. 23, no. 10, p. 1306, Oct. 2021, doi: 10.3390/e23101306.
     """
 
     # system input
     input: DEMInputJAX
 
     # dynamic state estimates
-    mu_x_tildes: ArrayImpl
-    mu_v_tildes: ArrayImpl
-    sig_x_tildes: ArrayImpl
-    sig_v_tildes: ArrayImpl
+    mu_dyn_tildes: ArrayImpl
+    sig_dyn_tildes: ArrayImpl
 
     # static parameter and hyperparameter estimates
     mu_theta: ArrayImpl
@@ -1567,10 +1509,8 @@ class DEMStateJAX:
         _verify_attr_dtypes(
             self,
             [
-                "mu_x_tildes",
-                "mu_v_tildes",
-                "sig_x_tildes",
-                "sig_v_tildes",
+                "mu_dyn_tildes",
+                "sig_dyn_tildes",
                 "mu_theta",
                 "mu_lambda",
                 "sig_theta",
@@ -1586,10 +1526,8 @@ class DEMStateJAX:
             m_v=state.input.m_v,
             p=state.input.p,
             d=state.input.d,
-            mu_x_tildes=state.mu_x_tildes,
-            mu_v_tildes=state.mu_v_tildes,
-            sig_x_tildes=state.sig_x_tildes,
-            sig_v_tildes=state.sig_v_tildes,
+            mu_dyn_tildes=state.mu_dyn_tildes,
+            sig_dyn_tildes=state.sig_dyn_tildes,
             y_tildes=state.input.y_tildes,
             eta_v_tildes=state.input.eta_v_tildes,
             p_v_tildes=state.input.p_v_tildes,
@@ -1627,10 +1565,8 @@ class DEMStateJAX:
             m_v=state.input.m_v,
             p=state.input.p,
             d=state.input.d,
-            mu_x_tildes=state.mu_x_tildes,
-            mu_v_tildes=state.mu_v_tildes,
-            sig_x_tildes=state.sig_x_tildes,
-            sig_v_tildes=state.sig_v_tildes,
+            mu_dyn_tildes=state.mu_dyn_tildes,
+            sig_dyn_tildes=state.sig_dyn_tildes,
             y_tildes=state.input.y_tildes,
             eta_v_tildes=state.input.eta_v_tildes,
             p_v_tildes=state.input.p_v_tildes,
@@ -1678,13 +1614,15 @@ class DEMStateJAX:
             jnp.kron(input.noise_autocorr_inv, jnp.eye(input.m_x)),
             (len(mu_v_tildes), 1, 1),
         )
+        sig_v_tildes = jnp.linalg.inv(input.p_v_tildes)
+
+        mu_dyn_tildes = jnp.concatenate([mu_x_tildes, mu_v_tildes], axis=1)
+        sig_dyn_tildes = vmap(jsp.linalg.block_diag)(sig_x_tildes, sig_v_tildes)
 
         kwargs_default = dict(
             input=input,
-            mu_x_tildes=mu_x_tildes,
-            mu_v_tildes=mu_v_tildes,
-            sig_x_tildes=sig_x_tildes,
-            sig_v_tildes=jnp.linalg.inv(input.p_v_tildes),
+            mu_dyn_tildes=mu_dyn_tildes,
+            sig_dyn_tildes=sig_dyn_tildes,
             mu_theta=input.eta_theta,
             mu_lambda=input.eta_lambda,
             sig_theta=jnp.linalg.inv(input.p_theta),
@@ -1697,20 +1635,18 @@ class DEMStateJAX:
     def step_d(state, lr_dynamic=1, low_memory=False):
         """
         Performs D step of DEM, updating estimates of generalized states
-        (mu_x_tildes) and generalized causes (mu_v_tildes).
+        and generalized causes (mu_dyn_tildes).
 
         Args:
             lr_dynamic (float): learning rate
         """
-        state.mu_x_tildes, state.mu_v_tildes = _update_xv(
+        state.mu_dyn_tildes = _update_xv(
             m_x=state.input.m_x,
             m_v=state.input.m_v,
             p=state.input.p,
             d=state.input.d,
-            mu_x_tildes=state.mu_x_tildes,
-            mu_v_tildes=state.mu_v_tildes,
-            sig_x_tildes=state.sig_x_tildes,
-            sig_v_tildes=state.sig_v_tildes,
+            mu_dyn_tildes=state.mu_dyn_tildes,
+            sig_dyn_tildes=state.sig_dyn_tildes,
             y_tildes=state.input.y_tildes,
             eta_v_tildes=state.input.eta_v_tildes,
             p_v_tildes=state.input.p_v_tildes,
@@ -1746,10 +1682,8 @@ class DEMStateJAX:
             m_v=state.input.m_v,
             p=state.input.p,
             d=state.input.d,
-            mu_x_tildes=state.mu_x_tildes,
-            mu_v_tildes=state.mu_v_tildes,
-            sig_x_tildes=state.sig_x_tildes,
-            sig_v_tildes=state.sig_v_tildes,
+            mu_dyn_tildes=state.mu_dyn_tildes,
+            sig_dyn_tildes=state.sig_dyn_tildes,
             y_tildes=state.input.y_tildes,
             eta_v_tildes=state.input.eta_v_tildes,
             p_v_tildes=state.input.p_v_tildes,
@@ -1786,10 +1720,8 @@ class DEMStateJAX:
             m_v=state.input.m_v,
             p=state.input.p,
             d=state.input.d,
-            mu_x_tildes=state.mu_x_tildes,
-            mu_v_tildes=state.mu_v_tildes,
-            sig_x_tildes=state.sig_x_tildes,
-            sig_v_tildes=state.sig_v_tildes,
+            mu_dyn_tildes=state.mu_dyn_tildes,
+            sig_dyn_tildes=state.sig_dyn_tildes,
             y_tildes=state.input.y_tildes,
             eta_v_tildes=state.input.eta_v_tildes,
             p_v_tildes=state.input.p_v_tildes,
@@ -1824,8 +1756,7 @@ class DEMStateJAX:
         (
             state.sig_theta,
             state.sig_lambda,
-            state.sig_x_tildes,
-            state.sig_v_tildes,
+            state.sig_dyn_tildes,
         ) = _update_precision(
             mu_theta=state.mu_theta,
             mu_lambda=state.mu_lambda,
@@ -1839,10 +1770,8 @@ class DEMStateJAX:
             m_v=state.input.m_v,
             p=state.input.p,
             d=state.input.d,
-            mu_x_tildes=state.mu_x_tildes,
-            mu_v_tildes=state.mu_v_tildes,
-            sig_x_tildes=state.sig_x_tildes,
-            sig_v_tildes=state.sig_v_tildes,
+            mu_dyn_tildes=state.mu_dyn_tildes,
+            sig_dyn_tildes=state.sig_dyn_tildes,
             y_tildes=state.input.y_tildes,
             eta_v_tildes=state.input.eta_v_tildes,
             p_v_tildes=state.input.p_v_tildes,
@@ -1921,10 +1850,8 @@ class DEMStateJAX:
                 computing hessians.
         """
         (
-            state.mu_x_tildes,
-            state.mu_v_tildes,
-            state.sig_x_tildes,
-            state.sig_v_tildes,
+            state.mu_dyn_tildes,
+            state.sig_dyn_tildes,
             state.mu_theta,
             state.mu_lambda,
             state.sig_theta,
@@ -1934,10 +1861,8 @@ class DEMStateJAX:
             m_v=state.input.m_v,
             p=state.input.p,
             d=state.input.d,
-            mu_x_tildes=state.mu_x_tildes,
-            mu_v_tildes=state.mu_v_tildes,
-            sig_x_tildes=state.sig_x_tildes,
-            sig_v_tildes=state.sig_v_tildes,
+            mu_dyn_tildes=state.mu_dyn_tildes,
+            sig_dyn_tildes=state.sig_dyn_tildes,
             y_tildes=state.input.y_tildes,
             eta_v_tildes=state.input.eta_v_tildes,
             p_v_tildes=state.input.p_v_tildes,
@@ -1982,13 +1907,19 @@ def generalized_batch_to_sequence(tensor, m, is2d=False):
 
 
 def extract_dynamic(state: DEMStateJAX):
-    mu_xs = generalized_batch_to_sequence(state.mu_x_tildes, state.input.m_x)
-    sig_xs = generalized_batch_to_sequence(
-        state.sig_x_tildes, state.input.m_x, is2d=True
+    mu_x_tildes, mu_v_tildes = _dyn_to_xv_tilde(
+        state.mu_dyn_tildes, m_x=state.input.m_x, p=state.input.p
     )
-    mu_vs = generalized_batch_to_sequence(state.mu_v_tildes, state.input.m_v)
+    mu_xs = generalized_batch_to_sequence(mu_x_tildes, state.input.m_x)
+    sig_x_tildes, sig_v_tildes = _dyn_to_xv_tilde(
+        state.sig_dyn_tildes, m_x=state.input.m_x, p=state.input.p, cov=True
+    )
+    sig_xs = generalized_batch_to_sequence(
+        sig_x_tildes, state.input.m_x, is2d=True
+    )
+    mu_vs = generalized_batch_to_sequence(mu_v_tildes, state.input.m_v)
     sig_vs = generalized_batch_to_sequence(
-        state.sig_v_tildes, state.input.m_v, is2d=True
+        sig_v_tildes, state.input.m_v, is2d=True
     )
     idx_first = int(state.input.p_comp // 2)
     idx_last = idx_first + len(mu_xs)
