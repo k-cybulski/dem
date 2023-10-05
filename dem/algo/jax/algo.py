@@ -139,13 +139,7 @@ def _dyn_to_xv_tilde(dyn_tilde, m_x, p, cov=False):
     return x_tildes, v_tildes
 
 
-@partial(
-    jit,
-    static_argnames=(
-        "m_x",
-        "p",
-    ),
-)
+@jit
 def _dyn_from_xv_tilde(x_tilde, v_tilde):
     """Combines generalized states x_tilde and causes v_tilde to form
     dyn_tilde, corresponding to vector X of [1]. Works both on a single
