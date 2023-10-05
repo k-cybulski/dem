@@ -2,8 +2,8 @@ import numpy as np
 from matplotlib import pyplot as plt
 from scipy.stats import multivariate_normal
 
-from hdm.dummy import sin_gen, cos_gen, combine_gen
-from hdm.core import taylor_mat
+from dem.dummy import sin_gen, cos_gen, combine_gen
+from dem.core import taylor_mat
 
 
 # Sanity check: Can we convert from generalized coordinates to normal coordinates?

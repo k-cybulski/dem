@@ -3,8 +3,8 @@ import numpy as np
 from matplotlib import pyplot as plt
 from pandas.plotting import autocorrelation_plot
 
-from hdm.core import taylor_mat
-from hdm.noise import (generate_noise_gp, generate_noise_conv,
+from dem.core import taylor_mat
+from dem.noise import (generate_noise_gp, generate_noise_conv,
                        autocorr_gaussian, autocorr_friston,
                        noise_cov_gen_theoretical)
 
