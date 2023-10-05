@@ -1,11 +1,10 @@
 from functools import partial
-from math import ceil
 
 import jax.numpy as jnp
+
 # DEM experiments often involve extremely high priors, which do not work well
 # with single precision float32
-from jax import jacrev, jit, jvp, vjp, vmap
-from jax.lax import fori_loop
+from jax import jit
 
 
 @jit
