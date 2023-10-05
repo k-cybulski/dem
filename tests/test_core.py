@@ -1,7 +1,6 @@
 import dem.core
 import numpy as np
 import pytest
-import torch
 
 
 @pytest.fixture
@@ -16,7 +15,7 @@ def ex_sincos():
     return ys, ts, dt
 
 
-@pytest.mark.parametrize("array_type", [np.array, torch.tensor])
+@pytest.mark.parametrize("array_type", [np.array])
 def test_iterate_generalized_padding(ex_sincos, array_type):
     ys, ts, dt = ex_sincos
 

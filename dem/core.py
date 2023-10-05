@@ -1,5 +1,4 @@
 import numpy as np
-import torch
 from scipy.special import factorial
 
 
@@ -73,7 +72,7 @@ def iterate_generalized(y, dt, p, p_comp=None):
     m variables * (p derivatives + 1 value at midpoint).
 
     Args:
-        y (torch.Tensor): Timeseries of data, where each column contains the
+        y (np.array): Timeseries of data, where each column contains the
             timeseries of one covariate.
         dt (float): Sampling frequency.
         p (int): Embedding order in output vectors. The output vectors contain
@@ -96,8 +95,6 @@ def iterate_generalized(y, dt, p, p_comp=None):
     y.shape[1]
 
     mat = taylor_mat(p_comp, dt, inv=True)
-    if isinstance(y, torch.Tensor):
-        mat = torch.from_numpy(mat).to(dtype=y.dtype, device=y.device)
 
     for i in range(0, y.shape[0] - p_comp - 1):
         weaved = weave_gen((mat @ y[i : (i + p_comp + 1), :])[: (p + 1), :])

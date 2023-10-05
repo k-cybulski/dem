@@ -3,7 +3,6 @@ Various helper functions for testing.
 """
 
 import numpy as np
-import torch
 from scipy.integrate import solve_ivp
 
 from .noise import generate_noise_conv
@@ -225,23 +224,3 @@ def dummy_lti(
         A, B, C, D, x0, dt, vs, w_sd, z_sd, noise_temporal_sig, rng
     )
     return A, B, C, D, x0, ts, vs, xs, ys, ws, zs
-
-
-def assert_system_func_equivalence(func_ode, func_batch, m_x, m_v, params, seed=4):
-    """
-    Checks whether or not a numpy function appropriate for ODE solvers is
-    equivalent to a torch function applicable to batches.
-    """
-    rng = np.random.default_rng(seed)
-    bnum = 7
-    xs = rng.normal(np.zeros((bnum, m_x)))
-    vs = rng.normal(np.zeros((bnum, m_v)))
-    ys_gt = np.stack([func_ode(x, v, params) for x, v in zip(xs, vs)])
-    ys_gt_t = torch.tensor(ys_gt, dtype=torch.float32).reshape((bnum, -1, 1))
-
-    params_t = torch.tensor(params, dtype=torch.float32)
-    xs_t = torch.tensor(xs, dtype=torch.float32).reshape((bnum, m_x, 1))
-    vs_t = torch.tensor(vs, dtype=torch.float32).reshape((bnum, m_v, 1))
-    ys_t = func_batch(xs_t, vs_t, params_t)
-
-    assert torch.isclose(ys_gt_t, ys_t).all()
