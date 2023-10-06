@@ -22,6 +22,5 @@ setup(
         "scipy>=1.11.1",
         "scikit-learn>=1.3.0",
         "sympy>=1.12",
-        "tqdm",
     ],
 )

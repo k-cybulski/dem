@@ -4,6 +4,15 @@ This repo contains an implementation of Dynamic Expectation Maximization (DEM) [
 
 ## Usage
 
+To try out the package, get into your favourite Python virtual environment and run
+```
+pip install .
+```
+To run the example notebooks, also install
+```
+pip install jupyter matplotlib tqdm tabulate
+```
+
 The DEM algorithm API is accessible via two classes:
 
 - `dem.algo.DEMInput` which contains input data as well as priors. It is static over the course of DEM.
