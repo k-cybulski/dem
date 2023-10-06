@@ -510,7 +510,8 @@ def free_action(
 
 
 def _verify_attr_dtypes(parent, attributes, dtype):
-    """Verifies that all of the"""
+    """Verifies that all of the chosen attributes of an object have the desired
+    dtype"""
     for attr in attributes:
         obj = getattr(parent, attr)
         if not isinstance(obj, ArrayImpl) and not isinstance(obj, np.ndarray):
