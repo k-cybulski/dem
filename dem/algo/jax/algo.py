@@ -178,7 +178,6 @@ def internal_energy_dynamic(
     @partial(jit, static_argnames=("diagnostic",))
     def _int_eng_dynamic(mu_dyn_tildes, mu_theta, mu_lambda, diagnostic=False):
         mu_x_tildes, mu_v_tildes = _dyn_to_xv_tilde(mu_dyn_tildes, m_x, p)
-        # FIXME: dyn_tildes to x_tildes v_tildes
         # Need to pad v_tilde with zeros to account for difference between
         # state embedding order `p` and causes embedding order `d`.
         mu_v_tildes_pad = jnp.pad(mu_v_tildes, ((0, 0), (0, p - d), (0, 0)))

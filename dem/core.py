@@ -2,7 +2,7 @@ import numpy as np
 from scipy.special import factorial
 
 
-def taylor_mat(p, dt, m=1, inv=False):
+def taylor_mat(p, dt, inv=False):
     """
     Taylor approximation matrix. Used for a Taylor polynomial approximation to
     move from time coordinates to generalized coordinates and vice versa. See
@@ -20,7 +20,6 @@ def taylor_mat(p, dt, m=1, inv=False):
         p:  order of approximation. The generalized coordinates vector has p +
             1 entries, for p derivatives and for value at central timestep.
         dt: delta time of the time data.
-        m:  [TODO] how many separate variables are described in y? y is expected
 
 
     [1] A. Anil Meera and M. Wisse, “Dynamic Expectation Maximization Algorithm
@@ -36,12 +35,6 @@ def taylor_mat(p, dt, m=1, inv=False):
             ) / factorial(j - 1)
     if inv:
         matr = np.linalg.inv(matr)
-    if m > 1:
-        # Doing this would follow the notation of [1] (Eq. 8)
-        # however, this requires that the input is just a vector of interleaved features like
-        # [x1 y1 x2 y2 x3 y3 ...].T but it's not clear that is the notation we should stick to?
-        raise NotImplementedError("Don't use this.")
-        matr = np.kron(matr, np.eye(m))
     return matr
 
 
@@ -56,12 +49,6 @@ def weave_gen(matr):
 
     into vector [x1 x2 x3 x1' x2' x3'].T
     """
-    # NOTE: This might all be kind of pointless?
-    # https://stackoverflow.com/a/5347492
-    # out = np.empty((matr.shape[0] * matr.shape[1], 1), dtype=matr.dtype)
-    # for col in range(matr.shape[1]):
-    #     out[col::2, 0] = matr[:, col]
-    # return out
     return matr.reshape((matr.shape[0] * matr.shape[1], 1))
 
 
