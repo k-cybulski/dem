@@ -18,7 +18,7 @@ The DEM algorithm API is accessible via two classes:
 - `dem.algo.DEMInput` which contains input data as well as priors. It is static over the course of DEM.
 - `dem.algo.DEMState` which contains parameter estimates. It contains all of the terms which vary over the course of DEM. It also includes methods for actually running the algorithm.
 
-Example notebooks in `examples/notebooks` illustrate how these can be applied. For clarification on what all of the parameters mean, have a look at the documentation of these two classes.
+Example notebooks in [examples/notebooks](examples/notebooks) illustrate how these can be applied. For clarification on what all of the parameters mean, have a look at the documentation of these two classes [in the code](dem/algo/jax/algo.py#L1198).
 
 ## Caveats
 
