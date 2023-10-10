@@ -2,6 +2,8 @@
 
 This repo contains an implementation of Dynamic Expectation Maximization (DEM) [1] relying on [JAX](https://jax.readthedocs.io/en/latest/) for fast automatic differentiation. It largely follows the derivation from [2], but adjusted to support nonlinear state transition and output functions as in [1].
 
+The use of automatic differentiation enables our implementation to invert dynamical systems defined by arbitrary differentiable functions. In addition, JAX makes it possible to speed up the procedure on a GPU.
+
 ## Usage
 
 To try out the package, get into your favourite Python virtual environment and run
