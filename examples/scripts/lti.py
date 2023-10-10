@@ -274,6 +274,7 @@ for i in tqdm(range(num_iter), desc="Running DEM..."):
 with open(OUTPUT_DIR / "experiment_state.pkl", "rb") as file_:
     demo_state = pickle.load(file_)
 
+# Plot parameter estimate convergence
 param_estimates = demo_state["param_estimates"]
 param_estimates_by_param = jnp.array(param_estimates).T
 
@@ -283,8 +284,8 @@ for est_seq, target in zip(
     true_params[: (m_x * m_x + m_x * m_v)],
 ):
     line = ax.plot(est_seq)[0]
-    ax.hlines(target, 0, len(est_seq), color=line.get_color(), linestyle="--")
-fig.suptitle("Parameter value estimates over course of DEM")
+    ax.hlines(target, 0, len(est_seq) - 1, color=line.get_color(), linestyle="--")
+# fig.suptitle("Parameter value estimates over course of DEM")
 ax.set_xlabel("DEM iteration")
 line_true = mpl.lines.Line2D(
     [], [], color="grey", marker="", markersize=15, label="True value", linestyle="--"
@@ -294,3 +295,40 @@ line_estimate = mpl.lines.Line2D(
 )
 ax.legend(handles=[line_true, line_estimate])
 fig.savefig(OUTPUT_DIR / "params_over_time.pdf")
+
+# Plot trajectory at the start of DEM, and at the end
+fig, ax = plt.subplots()
+mu_xs, sig_xs, mu_vs, sig_vs, ts_est = demo_state['trajectories'][0]
+for idx, (mu_x, x, color) in enumerate(zip(mu_xs.T, xs.T, ['red', 'blue'])):
+    ax.plot(ts_est, mu_x, linestyle='--', color=color)
+    ax.plot(ts, x, linestyle='-', color=color)
+# plt.suptitle("Initial trajectory estimate")
+ax.set_xlabel("time (s)")
+ax.set_ylim(-1.5, 1.5)
+line_true = mpl.lines.Line2D(
+    [], [], color="grey", marker="", markersize=15, label="True value", linestyle="-"
+)
+line_estimate = mpl.lines.Line2D(
+    [], [], color="grey", marker="", markersize=15, label="Estimate", linestyle="--"
+)
+ax.legend(handles=[line_true, line_estimate])
+fig.savefig(OUTPUT_DIR / "trajectory_initial.pdf")
+
+
+# Plot trajectory at the start of DEM, and at the end
+fig, ax = plt.subplots()
+mu_xs, sig_xs, mu_vs, sig_vs, ts_est = demo_state['trajectories'][-1]
+for idx, (mu_x, x, color) in enumerate(zip(mu_xs.T, xs.T, ['red', 'blue'])):
+    ax.plot(ts_est, mu_x, linestyle='--', color=color)
+    ax.plot(ts, x, linestyle='-', color=color)
+# plt.suptitle("Final trajectory estimate")
+ax.set_ylim(-1.5, 1.5)
+ax.set_xlabel("time (s)")
+line_true = mpl.lines.Line2D(
+    [], [], color="grey", marker="", markersize=15, label="True value", linestyle="-"
+)
+line_estimate = mpl.lines.Line2D(
+    [], [], color="grey", marker="", markersize=15, label="Estimate", linestyle="--"
+)
+ax.legend(handles=[line_true, line_estimate])
+fig.savefig(OUTPUT_DIR / "trajectory_final.pdf")

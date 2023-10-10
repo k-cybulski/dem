@@ -116,28 +116,37 @@ dem_state = DEMState.from_input(dem_input, x0=x0_test)
 lr_dynamic = 1
 dem_state.step_d(lr_dynamic)
 
+Path("out").mkdir(exist_ok=True)  # make a path for output images
+
 # Extract and plot the trajectories
 mu_xs1, sig_xs1, mu_vs1, sig_vs1, ts1 = extract_dynamic(dem_state)
 
-Path("out").mkdir(exist_ok=True)  # make a path for output images
 fig, ax = plt.subplots()
-ax.plot(ts, xs[:, 0], label="Target 1", color="blue", linewidth=0.5)
+fig.set_size_inches(10, 5)
+ax.plot(ts, xs[:, 0], color="blue", linewidth=0.5)
 ax.plot(
-    ts1, mu_xs1[:, 0], label="Model 1", color="blue", linestyle="--", linewidth=0.75
+    ts1, mu_xs1[:, 0], color="blue", linestyle="--", linewidth=0.75
 )
-ax.plot(ts, xs[:, 1], label="Target 2", color="red", linewidth=0.5)
-ax.plot(ts1, mu_xs1[:, 1], label="Model 2", color="red", linestyle="--", linewidth=0.75)
-ax.plot(ts, xs[:, 2], label="Target 3", color="violet", linewidth=0.5)
+ax.plot(ts, xs[:, 1], color="red", linewidth=0.5)
+ax.plot(ts1, mu_xs1[:, 1], color="red", linestyle="--", linewidth=0.75)
+ax.plot(ts, xs[:, 2], color="violet", linewidth=0.5)
 ax.plot(
-    ts1, mu_xs1[:, 2], label="Model 3", color="violet", linestyle="--", linewidth=0.75
+    ts1, mu_xs1[:, 2], color="violet", linestyle="--", linewidth=0.75
 )
-ax.legend()
+ax.set_xlabel("timestep")
+# Legend
+line_true = mpl.lines.Line2D(
+    [], [], color="grey", marker="", markersize=15, label="True value", linestyle="-"
+)
+line_estimate = mpl.lines.Line2D(
+    [], [], color="grey", marker="", markersize=15, label="Estimate", linestyle="--"
+)
+ax.legend(handles=[line_true, line_estimate])
 fig.savefig("out/lorenz-01.pdf")
-plt.close(fig)
 
 # Unfortunately, the current implementation is not able to do the E, M, and
 # precision steps, because the memory usage explodes :(
 # I'm guessing that the parallelized computations of hessians are to blame. They could be made parallelized,
 
-print("Computing free action...")
-f_bar = dem_state.free_action()
+# print("Computing free action...")
+# f_bar = dem_state.free_action()
